@@ -43,6 +43,6 @@ class Task(Base):
         Index(
             "ix_tasks_due",
             "due_at",
-            postgresql_where="due_at IS NOT NULL AND status = 'pending'",
+            postgresql_where="due_at IS NOT NULL AND status = 'pending'::task_status",
         ),
     )
