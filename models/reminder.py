@@ -29,6 +29,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
+        Index("ix_reminders_user_id", "user_id"),
         # Hot path for the arq cron poller — only unsent reminders scanned.
         Index(
             "ix_reminders_due_unsent",

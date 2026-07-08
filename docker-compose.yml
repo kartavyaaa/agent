@@ -12,7 +12,7 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
-
+ 
   redis:
     image: redis:7-alpine
     healthcheck:
@@ -20,7 +20,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
+ 
   app:
     build:
       context: .
@@ -42,7 +42,7 @@ services:
              uvicorn clients.api.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
-
+ 
   worker:
     build:
       context: .
@@ -57,8 +57,9 @@ services:
       - REDIS_URL
       - OPENAI_API_KEY
       - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_WEBHOOK_SECRET
       - ENVIRONMENT=production
     command: python -m arq infra.worker.worker_settings.WorkerSettings
-
+ 
 volumes:
   pgdata: {}

@@ -29,7 +29,7 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(TaskStatusEnum, server_default="pending")
-    priority: Mapped[int] = mapped_column(SmallInteger, default=1)
+    priority: Mapped[int] = mapped_column(SmallInteger, default=1, server_default="1")
     due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     plugin_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     plugin_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # type: ignore[type-arg]

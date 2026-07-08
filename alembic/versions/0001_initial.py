@@ -1,27 +1,27 @@
 """Initial schema: all tables, ENUM types, btree and partial indexes.
- 
+
 Revision ID: 0001
 Revises:
 Create Date: 2026-07-07
 """
- 
+
 from __future__ import annotations
- 
+
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
- 
+
 from alembic import op
- 
+
 revision = "0001"
 down_revision = None
 branch_labels = None
 depends_on = None
- 
- 
+
+
 def upgrade() -> None:
     # pgvector extension — required for the Vector column type
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
- 
+
     # ENUM types
     op.execute("CREATE TYPE memory_type AS ENUM ('working','episodic','semantic','knowledge')")
     op.execute(
@@ -32,14 +32,14 @@ def upgrade() -> None:
     op.execute(
         "CREATE TYPE plugin_health_status AS ENUM ('healthy','degraded','unhealthy','unknown')"
     )
- 
+
     # users
     op.create_table(
         "users",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("telegram_id", sa.BigInteger(), unique=True, nullable=True),
         sa.Column("api_key_hash", sa.String(64), nullable=True),
-        sa.Column("preferences", postgresql.JSONB(), server_default="{}"),
+        sa.Column("preferences", postgresql.JSONB(), server_default="{}", nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -53,7 +53,7 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
- 
+
     # projects (created before tasks/reminders which FK to it)
     op.create_table(
         "projects",
@@ -76,8 +76,9 @@ def upgrade() -> None:
                 create_type=False,
             ),
             server_default="active",
+            nullable=False,
         ),
-        sa.Column("metadata", postgresql.JSONB(), server_default="{}"),
+        sa.Column("metadata", postgresql.JSONB(), server_default="{}", nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -92,7 +93,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_projects_user_id", "projects", ["user_id"])
- 
+
     # tasks
     op.create_table(
         "tasks",
@@ -123,8 +124,9 @@ def upgrade() -> None:
                 create_type=False,
             ),
             server_default="pending",
+            nullable=False,
         ),
-        sa.Column("priority", sa.SmallInteger(), server_default="1"),
+        sa.Column("priority", sa.SmallInteger(), server_default="1", nullable=False),
         sa.Column("due_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("plugin_name", sa.String(100), nullable=True),
         sa.Column("plugin_payload", postgresql.JSONB(), nullable=True),
@@ -146,7 +148,7 @@ def upgrade() -> None:
         "CREATE INDEX ix_tasks_due ON tasks (due_at) "
         "WHERE due_at IS NOT NULL AND status = 'pending'::task_status"
     )
- 
+
     # reminders
     op.create_table(
         "reminders",
@@ -180,7 +182,7 @@ def upgrade() -> None:
         "CREATE INDEX ix_reminders_due_unsent ON reminders (remind_at, sent_at) "
         "WHERE sent_at IS NULL"
     )
- 
+
     # memories — embedding column uses pgvector Vector type via raw DDL
     op.execute("""
         CREATE TABLE memories (
@@ -204,15 +206,15 @@ def upgrade() -> None:
     op.execute(
         "CREATE INDEX ix_memories_expires ON memories (expires_at) WHERE expires_at IS NOT NULL"
     )
- 
+
     # plugin_registry
     op.create_table(
         "plugin_registry",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("plugin_name", sa.String(100), unique=True, nullable=False),
         sa.Column("version", sa.String(20), nullable=False),
-        sa.Column("enabled", sa.Boolean(), server_default="true"),
-        sa.Column("config", postgresql.JSONB(), server_default="{}"),
+        sa.Column("enabled", sa.Boolean(), server_default="true", nullable=False),
+        sa.Column("config", postgresql.JSONB(), server_default="{}", nullable=False),
         sa.Column(
             "health_status",
             postgresql.ENUM(
@@ -224,11 +226,12 @@ def upgrade() -> None:
                 create_type=False,
             ),
             server_default="unknown",
+            nullable=False,
         ),
         sa.Column("last_health_check_at", sa.DateTime(timezone=True), nullable=True),
     )
- 
- 
+
+
 def downgrade() -> None:
     op.drop_table("plugin_registry")
     op.execute("DROP TABLE IF EXISTS memories")

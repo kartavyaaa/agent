@@ -155,3 +155,75 @@ Before running any live request through `OpenAIProvider`, verify these against c
 2. **Hardcoded `memories_written=1`** — `CoreResponse(memories_written=1, ...)` is a lie if `memory.write` raises or if multiple memory writes are needed per turn. Phase 2 should count actual successful `write()` calls (or use a return value from `write` to confirm persistence).
 
 Neither is a bug in the current single-call slice (only one tool fires per request), but both will produce incorrect behavior in the multi-step loop.
+
+---
+
+## 2026-07-08 — Schema single source of truth: drift detection test
+
+**Decision:** Option A — schema equivalence integration test. Option B (autogenerate) was
+rejected: pgvector `Vector(1536)`, the HNSW index (raw DDL), three partial indexes with
+raw-SQL `WHERE` clauses, and the `create_type=False` enum pattern all require custom
+autogenerate hooks to reproduce correctly — autogenerate would silently DROP+RECREATE them.
+
+**What was built:** `tests/integration/test_schema_equivalence.py`
+
+Two independent `pgvector/pgvector:pg16` testcontainer instances — full isolation avoids
+enum type-name collisions and search_path confusion that a two-schema approach would cause:
+- Container 1 (alembic): `alembic upgrade head` via subprocess (same pattern as `test_full_flow.py`)
+- Container 2 (models): `CREATE EXTENSION` + manual `CREATE TYPE` ×4 (create_type=False suppresses
+  them in create_all) + `await conn.run_sync(Base.metadata.create_all)` — all-async, no psycopg2
+- Container 3 (drift): throwaway `MetaData` with one extra column on `users`, proves guard fires
+
+**What is compared:**
+- Columns: `udt_name`, `is_nullable`, normalised `column_default` (strips `::type_casts`, outer
+  quotes; normalises `now()` / `CURRENT_TIMESTAMP`; enum defaults compared after cast stripping)
+- Indexes: `pg_indexes.indexdef` normalised (whitespace collapse); `ix_memories_embedding_hnsw`
+  excluded from diff (legitimately absent from model side per `models/memory.py`), asserted
+  present on alembic side separately
+- ENUMs: `pg_enum JOIN pg_type` — type name + label list in sort order
+
+**`pyproject.toml`:** Added `testcontainers>=4.0` to dev deps (no `[postgres]` extra in 4.x;
+was already imported in `test_full_flow.py` but undeclared).
+
+**Quality gate:** ruff ✓ · black ✓ (3.11 VM, AST check degraded — expected) · mypy ✓
+(102 source files, 0 errors) · pytest 43/43 unit ✓ · 2 new integration tests deselected
+(Docker not available on VM — **authoritative run PENDING on PC**).
+
+**How to run the check (PC):**
+```
+pytest tests/integration/test_schema_equivalence.py -v
+```
+Expected: `test_schema_equivalence` PASSES, `test_drift_is_detected` PASSES.
+
+**To trigger a failure deliberately:** introduce any column type change, enum label addition,
+or new index in either `models/` or `alembic/versions/` without updating the other side,
+then run the test — it will print the full diff and call `pytest.fail`.
+
+---
+
+## 2026-07-08 — Fix real drift found by schema equivalence test
+
+**What the test found (11 items, PC run):**
+
+1. **Nullability (8 columns):** `users.preferences`, `projects.status`, `projects.metadata`,
+   `tasks.status`, `tasks.priority`, `plugin_registry.enabled`, `plugin_registry.config`,
+   `plugin_registry.health_status` — all `NOT NULL` in models (have `server_default`, so nullable
+   is semantically wrong) but migration omitted `nullable=False`, defaulting to nullable in pg.
+2. **`users.telegram_id` type:** model inferred `int4` (no explicit column type); migration
+   correctly declared `BigInteger` (`int8`). Telegram IDs exceed 2^31 — `int8` is correct.
+3. **Server defaults (2 columns):** `memories.importance_score` and `tasks.priority` had
+   Python-side `default=` only; migration had DB-level `DEFAULT`. Added `server_default=` to
+   both model columns to match.
+4. **Missing indexes (2):** `ix_projects_user_id` and `ix_reminders_user_id` existed in the
+   migration but were absent from `__table_args__`. Added to `models/project.py` and
+   `models/reminder.py`.
+
+**Authoritative side per item:** Models right for nullability (migration fixed). Migration right
+for `telegram_id` type and the two indexes (models fixed). Models needed `server_default=` added.
+
+**Files changed:** `alembic/versions/0001_initial.py`, `models/user.py`, `models/memory.py`,
+`models/task.py`, `models/project.py`, `models/reminder.py`.
+
+**Quality gate (VM, provisional):** ruff ✓ · black ✓ · mypy ✓ (102 files) · pytest 43/43 unit ✓.
+**Authoritative run PENDING on PC:** `pytest tests/integration/test_schema_equivalence.py -v`
+must show 2 passed (zero drift + drift guard still live).

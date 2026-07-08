@@ -26,7 +26,7 @@ class Memory(Base):
     # Created in Alembic migration: USING hnsw (embedding vector_cosine_ops)
     # WITH (m=16, ef_construction=64)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
-    importance_score: Mapped[float] = mapped_column(Float, default=0.5)
+    importance_score: Mapped[float] = mapped_column(Float, default=0.5, server_default="0.5")
     memory_type: Mapped[str] = mapped_column(MemoryTypeEnum, nullable=False)
     metadata_: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         "metadata", JSONB, server_default="{}"
