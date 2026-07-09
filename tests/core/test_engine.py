@@ -62,7 +62,11 @@ def _make_engine(
     mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     mock_llm = MagicMock()
-    mock_llm.complete = AsyncMock(return_value=llm_response or _message_response("hello"))
+    if llm_response and llm_response.response_type == "tool_calls":
+        synthesis = _message_response("Reminder set for 2026-07-08 09:00 UTC")
+        mock_llm.complete = AsyncMock(side_effect=[llm_response, synthesis])
+    else:
+        mock_llm.complete = AsyncMock(return_value=llm_response or _message_response("hello"))
     mock_llm.embed = AsyncMock(return_value=[[0.0] * 1536])
 
     mock_registry = MagicMock()
@@ -77,6 +81,8 @@ def _make_engine(
 
     mock_settings = MagicMock()
     mock_settings.openai_default_model = "gpt-5.5"
+    mock_settings.planner_max_iterations = 8
+    mock_settings.planner_default_temperature = 0.7
 
     engine = CoreEngine(
         llm=mock_llm,

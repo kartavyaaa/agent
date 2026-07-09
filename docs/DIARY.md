@@ -227,3 +227,37 @@ for `telegram_id` type and the two indexes (models fixed). Models needed `server
 **Quality gate (VM, provisional):** ruff ✓ · black ✓ · mypy ✓ (102 files) · pytest 43/43 unit ✓.
 **Authoritative run PENDING on PC:** `pytest tests/integration/test_schema_equivalence.py -v`
 must show 2 passed (zero drift + drift guard still live).
+
+---
+
+## 2026-07-08 — Session C: Phase 2 — ReAct Planner Loop
+
+**What was built:**
+
+- `core/planner/base.py`: `PlannerBase` ABC + `PlannerResult` dataclass (content, tool_calls_made, iterations). Plain dataclass, not Pydantic — internal return value, never serialised.
+- `core/planner/react.py`: `ReActPlanner` — full ReAct loop. Each iteration: LLM call → if tool_calls: append assistant msg (with all tool calls), execute each tool, append tool_result per tool, loop; if message: return. Raises `PlannerMaxIterationsError` at cap, `PlannerStuckLoopError` on repeated identical batch.
+- `core/engine.py`: `_process()` replaced to delegate to `ReActPlanner`. `_SYSTEM_PROMPT` expanded to list all registered tools by name dynamically. `memories_written` now derived from actual `memory.write()` return value (not hardcoded 1).
+- `tests/core/test_planner.py`: 13 unit tests (direct message, single tool, multi-tool accumulation, history format, max-iterations cap, stuck-loop detection with same/different args/tools/nested values, user_id injection, empty tools, three-turn sequence).
+- `tests/core/test_engine.py`: added `planner_max_iterations=8` and `planner_default_temperature=0.7` to mock settings; changed tool-call mock to `side_effect=[tool_call_resp, synthesis]` so the two-step loop gets a terminal message on the second call.
+- `tests/integration/test_full_flow.py`: `_mock_llm()` switched from `return_value` to `side_effect=[tool_call_resp, synthesis_resp]`; settings mock gains planner attrs.
+
+**What failed and why:**
+
+- `mypy` flagged `# type: ignore[return-value]` on `_format_tool_result` as unused (mypy on 3.11 inferred `Any` return from the `or` chain). Fixed by removing the ignore and wrapping in `str(...)`.
+- `ruff` auto-fixed 2 import-order issues in `react.py` (LLMTool moved alongside other LLM imports).
+- `black` reformatted `test_planner.py` (trailing comma placement in one function call). No logic changes.
+
+**Key design decisions:**
+
+- **Stuck-loop signature**: `json.dumps(sorted(...))` rather than `frozenset(sorted(items()))` — the latter crashes on unhashable nested dict/list argument values. JSON serialisation is safe for all value types.
+- **Provider-layer gap**: confirmed none. `openai_provider.py`'s `_to_item()` already correctly translates `role="assistant"` + `tool_calls` → `function_call` content block, and `role="tool_result"` + `tool_call_id` → `function_call_output`. No adapter changes needed. The PC integration test exercises the real adapter path.
+- **`memories_written`**: `memory.write()` already returns a `Memory` ORM object (not None) on success. Engine now counts `1 if mem is not None else 0`. In practice always 1 on the success path, but derived from the real call rather than hardcoded.
+- **Engine never catches planner exceptions**: `PlannerMaxIterationsError` / `PlannerStuckLoopError` propagate to `handle_request()`'s bare `except`, which rolls back and re-raises. No partial commit on planner failure.
+
+**Quality gate (VM, provisional):** ruff ✓ · black ✓ (3.11, AST check degraded — expected) · mypy ✓ (102 files, 0 errors) · pytest 56/56 unit ✓ · 3 integration tests deselected (Docker not available on VM).
+
+**Authoritative run PENDING on PC:**
+```
+pytest -v   # must include integration + schema-equivalence, 0 skipped
+docker compose up --build   # app + worker must boot; /health → 200
+```
