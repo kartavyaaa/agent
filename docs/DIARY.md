@@ -261,3 +261,63 @@ must show 2 passed (zero drift + drift guard still live).
 pytest -v   # must include integration + schema-equivalence, 0 skipped
 docker compose up --build   # app + worker must boot; /health → 200
 ```
+
+---
+
+## 2026-07-08 — Session D: Slice 3a — web_search plugin + Serper integration
+
+**What was built:**
+
+- `core/exceptions.py`: Added `IntegrationRateLimitError(IntegrationError)` — HTTP 429 sentinel,
+  never retried.
+- `integrations/serper.py`: `SerperResult` dataclass (title, link, snippet). `SerperClient` with
+  injected `httpx.AsyncClient` (testability), tenacity retry on 5xx/timeout via `_is_retryable`
+  predicate, explicit 429 check before `raise_for_status()` to ensure rate-limit errors escape the
+  retry decorator, `health_check()` as `bool(api_key)` (no network call, no quota drain).
+- `plugins/web_search/schemas.py`: `WebSearchInput` (query + max_results with ge/le bounds),
+  `SearchResult`, `WebSearchOutput`, `WebSearchConfig`. No `user_id` in input schema.
+- `plugins/web_search/plugin.py`: `WebSearchPlugin(PluginBase)` — stateless, delegates to
+  `SerperClient`. Accepts `user_id`/`db` per contract but does not use them.
+- `clients/api/main.py`: Conditional registration (`if s.serper_api_key is not None`) with
+  startup `log.warning` when key absent. `serper_client.aclose()` called in lifespan teardown
+  to prevent connection-pool leak.
+- `tests/integrations/test_serper.py` (new): 10 tests using `pytest-httpx`. Covers happy path,
+  header verification, empty/missing organic key, 429 no-retry (call count asserted == 1),
+  401 no-retry, 500 retries ×3, timeout retries ×3, health_check true/false.
+- `tests/plugins/test_web_search.py` (replaced placeholder): 13 tests. Schema shape, bounds
+  validation, execute happy path, max_results forwarding, empty results, rate-limit propagation,
+  health_check delegation, planner integration (mocked LLM + real registry + mocked SerperClient
+  — proves tool_calls_made and final synthesis).
+
+**What failed and why:**
+
+- `pytest_httpx` not installed on VM — `pip install pytest-httpx` with `--trusted-host` flags.
+  (Already in `pyproject.toml` dev deps; just not in the VM's venv yet.)
+- Two test assertions used `keyword` form (`query="..."`) but `plugin.execute` calls
+  `client.search(data.query, num_results=...)` positionally. Fixed assertions to positional form.
+
+**Key design decisions:**
+
+- `_is_retryable` predicate catches only `httpx.TimeoutException` and `httpx.HTTPStatusError`
+  with `status_code >= 500`. Because `IntegrationRateLimitError` is raised by explicit `if`
+  check *before* `raise_for_status()`, tenacity never sees it — 429 is never retried.
+- `health_check()` is `bool(self._api_key)` — no HTTP, no quota. A 429 on a health probe would
+  give a false unhealthy; a billed search per health probe is wasteful. Key presence is
+  the actionable signal.
+- `serper_client = None` initialized before the `if` branch so the teardown guard
+  (`if serper_client is not None: await serper_client.aclose()`) is always valid regardless of
+  whether the key was present at startup.
+
+**Quality gate (VM, provisional):** ruff ✓ (2 import-order auto-fixes) · black ✓ (3.11 AST
+check degraded — expected) · mypy ✓ (104 source files, 0 errors) · pytest 79/79 unit ✓ ·
+3 integration tests skipped (Docker not available on VM).
+
+**Authoritative run PENDING on PC:**
+```
+pytest -v   # incl. integration + schema equivalence — must still show 0 drift
+docker compose up --build   # /health → 200; worker must not crash-loop
+```
+
+**Note on `.env.example`:** The file exists but is unreadable in the VM session (permissions
+restriction). Verify `grep -i serper .env.example` on PC; add `SERPER_API_KEY=your-serper-key-here`
+if absent.

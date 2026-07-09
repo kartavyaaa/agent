@@ -57,5 +57,9 @@ class IntegrationError(PlatformError):
     """Raised by an integration client (Serper, GCal, etc.)."""
 
 
+class IntegrationRateLimitError(IntegrationError):
+    """Integration returned HTTP 429 — do not retry."""
+
+
 class ConfigurationError(PlatformError):
     """Raised when required configuration is missing or invalid."""

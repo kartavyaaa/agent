@@ -36,6 +36,7 @@ services:
       - OPENAI_API_KEY
       - TELEGRAM_BOT_TOKEN
       - TELEGRAM_WEBHOOK_SECRET
+      - SERPER_API_KEY
       - ENVIRONMENT=production
     command: >
       sh -c "alembic upgrade head &&
@@ -58,6 +59,7 @@ services:
       - OPENAI_API_KEY
       - TELEGRAM_BOT_TOKEN
       - TELEGRAM_WEBHOOK_SECRET
+      - SERPER_API_KEY
       - ENVIRONMENT=production
     command: python -m arq infra.worker.worker_settings.WorkerSettings
  
