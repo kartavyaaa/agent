@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import PostgresDsn, SecretStr
@@ -48,6 +49,10 @@ class Settings(BaseSettings):
     # Integrations
     serper_api_key: SecretStr | None = None
     google_credentials_json: str | None = None  # JSON string of service account creds
+
+    # File reader
+    file_reader_root: Path | None = None
+    file_reader_max_bytes: int = 1_048_576  # 1 MB default
 
     # Worker (arq)
     worker_queue_name: str = "arq:queue"

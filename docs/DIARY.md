@@ -2,6 +2,87 @@
 
 ---
 
+## 2026-07-12 — Slice 3b: file_reader plugin + local_fs integration
+
+**What was built:**
+
+- `core/exceptions.py`: Added `FileReaderError(IntegrationError)` base and five subclasses:
+  `SandboxViolationError`, `FileNotFoundInSandboxError`, `PathIsDirectoryError`,
+  `FileTooLargeError`, `FileDecodeError`. All inherit `FileReaderError` — uniform base, no raw
+  stdlib exceptions escape the integration layer.
+- `integrations/local_fs.py`: `LocalFsClient` with `read(requested_path)` and `health_check()`.
+  Security guard: join path as-is, call `.resolve()`, then assert `is_relative_to(root)` — this
+  is the *only* containment check. No string sanitization (fragile). Containment check runs
+  BEFORE `exists()`/`stat()` so out-of-sandbox paths reveal no filesystem information. Covers
+  `..`, absolute paths, symlinks, encoded traversal. File I/O runs in `asyncio.to_thread`.
+- `plugins/file_reader/schemas.py`: `FileReaderInput` (`path`, `summarize`), `FileReaderOutput`,
+  `FileReaderConfig`. No `user_id` in input schema.
+- `plugins/file_reader/plugin.py`: `FileReaderPlugin(PluginBase)` — reads via `LocalFsClient`,
+  calls `llm.complete()` with fast model for summarisation when content > 500 chars and
+  `summarize=True`. No direct openai import; goes through `LLMProvider` seam. `health_check()`
+  delegates to `client.health_check()`.
+- `core/config.py`: Added `file_reader_root: Path | None = None` and
+  `file_reader_max_bytes: int = 1_048_576`.
+- `clients/api/main.py`: Conditional registration of `FileReaderPlugin` mirroring web_search
+  pattern — warns and disables if `FILE_READER_ROOT` is unset.
+- `docker-compose.yml`: `FILE_READER_ROOT=/app/files` + `FILE_READER_MAX_BYTES` env vars on
+  both app and worker services; `./data/files:/app/files:ro` bind-mount (read-only — container
+  cannot write back).
+- `.env.example`: Added `SERPER_API_KEY` placeholder (was missing) and `FILE_READER_ROOT`,
+  `FILE_READER_MAX_BYTES` placeholders.
+- `data/files/.gitkeep`: Sandbox directory skeleton committed so the bind-mount source exists.
+- `tests/integration/test_local_fs.py`: 11 tests — real files in `tmp_path`, no mocking.
+  Security tests cover `..`, absolute paths, multi-hop traversal, symlink escape, nonexistent
+  file, directory-not-file, oversized file, non-UTF-8 bytes. Symlink test skipped on Windows
+  with explicit reason if `os.symlink` raises `OSError` (privilege restriction).
+- `tests/plugins/test_file_reader.py`: 14 tests — mocked client + LLM. Schema contract
+  (no `user_id`), short content (no LLM call), long content (LLM called with fast model, correct
+  prompt), summarize=False (LLM never called), error propagation, health check, planner
+  integration (mocked LLM → tool call → synthesis → asserts `read_file` in `tool_calls_made`).
+
+**What failed and why:**
+
+- One test assertion (`test_execute_long_content_llm_message_contains_path_and_content`) checked
+  for `"doc.txt"` in the LLM prompt, but `_make_client` defaulted `path="test.txt"` in the
+  returned `FileReadResult`. The plugin uses `result.path` (the resolved relative path from the
+  client) in the prompt, not the raw input path. Fixed by passing `path="doc.txt"` to
+  `_make_client` in that test.
+- Ruff auto-fixed 3 import-order issues in the new test files.
+- Black reformatted 4 files (trailing comma placement, line wraps). 3.11 AST warning is expected
+  noise — Docker gate on 3.12 is authoritative.
+
+**Key design decisions:**
+
+- **Resolve-then-contain, no string sanitization**: stripping `..` or `/` from the path string
+  before joining is fragile and can be bypassed by encoded or mixed-separator traversal.
+  `Path.resolve()` + `is_relative_to()` is sufficient and correct.
+- **Containment before existence**: rejecting before `exists()`/`stat()` prevents the client
+  from being used as an oracle to probe the host filesystem outside the sandbox.
+- **All errors are `FileReaderError` subclasses**: avoids leaking raw `FileNotFoundError`/
+  `IsADirectoryError` from stdlib, keeps the exception hierarchy uniform.
+- **Read-only Docker mount** (`./data/files:/app/files:ro`): container cannot write back to the
+  host directory — defence in depth beyond the sandbox root check.
+- **`data/files/` committed with `.gitkeep`**: the bind-mount source must exist on the host
+  before `docker compose up` or Docker will create it as root-owned and the mount may fail.
+
+**Quality gate (VM, provisional):** ruff ✓ (3 auto-fixes) · black ✓ (3.11 AST check degraded —
+expected) · mypy ✓ (104 source files, 0 errors) · pytest 102/102 unit ✓ · 1 skipped (symlink
+test, Windows privilege) · 3 integration tests deselected (Docker not available on VM).
+
+**Authoritative run PENDING on PC:**
+```
+pytest -v   # incl. integration + schema equivalence — must still show 0 drift
+docker compose up --build   # /health → 200; worker must not crash-loop
+# Smoke test: place a text file in ./data/files/hello.txt, send
+# "read hello.txt" through the engine — verify FileReaderPlugin fires
+```
+
+**Note on `.env.example`:** `SERPER_API_KEY` placeholder was previously absent from the file
+(only present in docker-compose env list). Added in this slice. Verify on PC with
+`grep -i serper .env.example` and `grep -i file_reader .env.example`.
+
+---
+
 ## 2026-07-07 — Session A: Architecture Design
 
 **What was done:**
@@ -321,3 +402,32 @@ docker compose up --build   # /health → 200; worker must not crash-loop
 **Note on `.env.example`:** The file exists but is unreadable in the VM session (permissions
 restriction). Verify `grep -i serper .env.example` on PC; add `SERPER_API_KEY=your-serper-key-here`
 if absent.
+
+---
+
+## 2026-07-12 — Fix: structlog/PrintLogger crash + compose env gap (post-3a PC verification)
+
+**What broke on PC:** `docker compose up` crashed at startup with `TypeError: PrintLogger.msg()
+got an unexpected keyword argument 'extra'`. Root cause: `configure_logging()` used
+`ProcessorFormatter.wrap_for_formatter` as the final processor — this is the stdlib bridge and
+produces an `extra=` kwarg intended for `logging.LogRecord`. `PrintLoggerFactory` produces
+`PrintLogger` whose `msg()` takes no keyword args. The two modes are incompatible; every log call
+crashed. Latent since Session A because unit tests run before `configure_logging()` is called, so
+structlog's default config (which works) was in effect during testing.
+
+**Additional issue:** `docker-compose.yml` app and worker services were missing `SERPER_API_KEY`
+in their environment lists — the key from `.env` was never injected into containers.
+
+**Fix:** Rewrote `configure_logging()` to keep `PrintLoggerFactory` throughout. The renderer
+(`ConsoleRenderer` or `JSONRenderer`) is now the terminal processor in the chain directly — no
+`wrap_for_formatter`, no `ProcessorFormatter`. stdlib routing preserved via a plain
+`StreamHandler` on the root logger. Added `SERPER_API_KEY` to both app and worker env lists.
+
+**PC sync changes:** `tests/integration/test_serper.py` (moved from `tests/integrations/` into
+the existing `tests/integration/` directory to keep all integration-style tests together).
+`tests/core/test_logging.py` removed on PC (logging verified through container boot instead).
+Slice 3a DIARY entry trimmed in sync — restored here.
+
+**Quality gate (PC, authoritative):** pytest -v ✓ (all integration tests ran including schema
+equivalence and full flow) · docker compose up --build ✓ · /health → 200 · web_search smoke
+test with real SERPER_API_KEY returned results.

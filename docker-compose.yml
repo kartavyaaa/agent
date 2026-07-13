@@ -37,7 +37,11 @@ services:
       - TELEGRAM_BOT_TOKEN
       - TELEGRAM_WEBHOOK_SECRET
       - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
       - ENVIRONMENT=production
+    volumes:
+      - ./data/files:/app/files:ro
     command: >
       sh -c "alembic upgrade head &&
              uvicorn clients.api.main:app --host 0.0.0.0 --port 8000"
@@ -60,7 +64,11 @@ services:
       - TELEGRAM_BOT_TOKEN
       - TELEGRAM_WEBHOOK_SECRET
       - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
       - ENVIRONMENT=production
+    volumes:
+      - ./data/files:/app/files:ro
     command: python -m arq infra.worker.worker_settings.WorkerSettings
  
 volumes:

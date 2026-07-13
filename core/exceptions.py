@@ -63,3 +63,27 @@ class IntegrationRateLimitError(IntegrationError):
 
 class ConfigurationError(PlatformError):
     """Raised when required configuration is missing or invalid."""
+
+
+class FileReaderError(IntegrationError):
+    """Base for all file-reader failures."""
+
+
+class SandboxViolationError(FileReaderError):
+    """Requested path resolves outside the configured sandbox root."""
+
+
+class FileNotFoundInSandboxError(FileReaderError):
+    """File does not exist within the sandbox."""
+
+
+class PathIsDirectoryError(FileReaderError):
+    """Requested path is a directory, not a file."""
+
+
+class FileTooLargeError(FileReaderError):
+    """File exceeds the configured size limit."""
+
+
+class FileDecodeError(FileReaderError):
+    """File content is not valid UTF-8."""
