@@ -30,7 +30,8 @@ def _make_usage() -> SimpleNamespace:
 
 
 def _make_message_response(text: str) -> SimpleNamespace:
-    content_part = SimpleNamespace(text=text)
+    # content items must carry type="output_text" to match real Responses API shape
+    content_part = SimpleNamespace(type="output_text", text=text)
     item = SimpleNamespace(type="message", content=[content_part])
     return SimpleNamespace(
         output=[item],
@@ -233,3 +234,200 @@ def test_list_models() -> None:
     models = provider.list_models()
     assert "gpt-5.5" in models
     assert "gpt-5.4-nano" in models
+
+
+@pytest.mark.asyncio
+async def test_complete_temperature_none_not_sent_to_api() -> None:
+    """When config.temperature is None the parameter must be absent from the API call.
+
+    GPT-5 family models reject temperature with 400; NOT_GIVEN causes the SDK to
+    omit it from the request body entirely.
+    """
+    provider = _make_provider()
+    mock_create = AsyncMock(return_value=_make_message_response("ok"))
+    _mock_client(provider).responses.create = mock_create
+
+    config = LLMConfig(model="gpt-5.5")  # temperature defaults to None
+    assert config.temperature is None
+
+    await provider.complete(_messages(), tools=None, config=config)
+
+    _, kwargs = mock_create.call_args
+    # NOT_GIVEN causes the SDK to omit the key; the kwarg value should be NOT_GIVEN
+    from openai import NOT_GIVEN as _NOT_GIVEN
+
+    assert kwargs.get("temperature") is _NOT_GIVEN
+
+
+@pytest.mark.asyncio
+async def test_complete_temperature_set_is_forwarded_to_api() -> None:
+    """When config.temperature is explicitly set it must be included in the API call."""
+    provider = _make_provider()
+    mock_create = AsyncMock(return_value=_make_message_response("ok"))
+    _mock_client(provider).responses.create = mock_create
+
+    config = LLMConfig(model="gpt-5.5", temperature=0.3)
+
+    await provider.complete(_messages(), tools=None, config=config)
+
+    _, kwargs = mock_create.call_args
+    assert kwargs.get("temperature") == 0.3
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn serialization — Responses API item shapes
+# ---------------------------------------------------------------------------
+
+
+def test_to_items_tool_result() -> None:
+    """tool_result → top-level function_call_output item."""
+    from core.llm.openai_provider import _to_items
+
+    msg = LLMMessage(role="tool_result", content="done", tool_call_id="call-99")
+    items = _to_items(msg)
+    assert len(items) == 1
+    assert items[0]["type"] == "function_call_output"
+    assert items[0]["call_id"] == "call-99"
+    assert items[0]["output"] == "done"
+
+
+def test_to_items_assistant_with_two_tool_calls_expands_to_two_items() -> None:
+    """assistant + N tool calls → N separate top-level function_call items.
+
+    The Responses API rejects "function_call" as a content-block type; prior
+    function calls must be top-level items, not nested in a message.
+    """
+    from core.llm.base import LLMToolCall
+    from core.llm.openai_provider import _to_items
+
+    tc1 = LLMToolCall(id="cid-1", name="web_search", arguments={"query": "python"})
+    tc2 = LLMToolCall(
+        id="cid-2",
+        name="create_reminder",
+        arguments={"message": "x", "remind_at": "2026-07-08T09:00:00Z"},
+    )
+    msg = LLMMessage(role="assistant", content="", tool_calls=[tc1, tc2])
+    items = _to_items(msg)
+
+    assert len(items) == 2
+    types = {item["type"] for item in items}
+    assert types == {"function_call"}
+    call_ids = [item["call_id"] for item in items]
+    assert call_ids == ["cid-1", "cid-2"]
+    names = [item["name"] for item in items]
+    assert names == ["web_search", "create_reminder"]
+    # arguments must be JSON strings, not dicts
+    import json as _json
+
+    for item in items:
+        assert isinstance(item["arguments"], str)
+        _json.loads(item["arguments"])  # must parse without error
+
+
+def test_to_items_multi_turn_call_id_pairing() -> None:
+    """Full multi-turn sequence: function_call items pair with function_call_output by call_id."""
+
+    from core.llm.base import LLMToolCall
+    from core.llm.openai_provider import _to_items
+
+    call_id = "cid-42"
+    # Turn 1: assistant emits tool call
+    assistant_msg = LLMMessage(
+        role="assistant",
+        content="",
+        tool_calls=[LLMToolCall(id=call_id, name="web_search", arguments={"query": "hello"})],
+    )
+    # Turn 2: tool result
+    result_msg = LLMMessage(role="tool_result", content='{"results": []}', tool_call_id=call_id)
+
+    assistant_items = _to_items(assistant_msg)
+    result_items = _to_items(result_msg)
+
+    assert len(assistant_items) == 1
+    assert assistant_items[0]["type"] == "function_call"
+    assert assistant_items[0]["call_id"] == call_id
+
+    assert len(result_items) == 1
+    assert result_items[0]["type"] == "function_call_output"
+    assert result_items[0]["call_id"] == call_id  # call_ids match — correct pairing
+
+
+def test_to_items_reasoning_echoed_verbatim() -> None:
+    """reasoning messages are echoed back as-is (raw_item passthrough)."""
+    from core.llm.openai_provider import _to_items
+
+    raw = {"type": "reasoning", "id": "r-001", "summary": []}
+    msg = LLMMessage(role="reasoning", content="", raw_item=raw)
+    items = _to_items(msg)
+    assert len(items) == 1
+    # Pydantic copies the dict on assignment, so check equality not identity
+    assert items[0] == raw
+    assert items[0]["type"] == "reasoning"
+    assert items[0]["id"] == "r-001"
+
+
+def test_to_items_user_message() -> None:
+    """user/system messages become a single EasyInputMessage dict."""
+    from core.llm.openai_provider import _to_items
+
+    msg = LLMMessage(role="user", content="hello world")
+    items = _to_items(msg)
+    assert len(items) == 1
+    assert items[0]["role"] == "user"
+    assert items[0]["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_complete_reasoning_items_collected() -> None:
+    """Reasoning items in the response are collected into LLMResponse.reasoning_items."""
+    provider = _make_provider()
+
+    reasoning_item = SimpleNamespace(
+        type="reasoning",
+        id="r-001",
+        summary=[SimpleNamespace(type="summary_text", text="I thought about this")],
+    )
+    message_item = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="Here is my answer")],
+    )
+    response = SimpleNamespace(
+        output=[reasoning_item, message_item],
+        model="gpt-5.5",
+        usage=_make_usage(),
+        id="resp-003",
+    )
+    _mock_client(provider).responses.create = AsyncMock(return_value=response)
+
+    result = await provider.complete(_messages(), tools=None, config=_config())
+
+    assert result.response_type == "message"
+    assert result.content == "Here is my answer"
+    assert len(result.reasoning_items) == 1
+    ri = result.reasoning_items[0]
+    assert ri["type"] == "reasoning"
+    assert ri["id"] == "r-001"
+    assert ri["summary"][0]["text"] == "I thought about this"
+
+
+@pytest.mark.asyncio
+async def test_complete_unknown_output_items_ignored() -> None:
+    """Unknown item types (web_search_call, etc.) are silently skipped."""
+    provider = _make_provider()
+
+    unknown_item = SimpleNamespace(type="web_search_call", id="ws-001")
+    message_item = SimpleNamespace(
+        type="message",
+        content=[SimpleNamespace(type="output_text", text="result")],
+    )
+    response = SimpleNamespace(
+        output=[unknown_item, message_item],
+        model="gpt-5.5",
+        usage=_make_usage(),
+        id="resp-004",
+    )
+    _mock_client(provider).responses.create = AsyncMock(return_value=response)
+
+    result = await provider.complete(_messages(), tools=None, config=_config())
+    assert result.response_type == "message"
+    assert result.content == "result"

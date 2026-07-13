@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # Planner
     planner_max_iterations: int = 8
-    planner_default_temperature: float = 0.7
+    planner_default_temperature: float | None = None
 
     # Telegram
     telegram_bot_token: SecretStr

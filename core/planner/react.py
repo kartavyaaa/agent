@@ -88,6 +88,11 @@ class ReActPlanner(PlannerBase):
                 )
             last_call_sig = current_sig
 
+            # Echo any reasoning items back before the assistant tool-call items
+            # so the model preserves chain-of-thought context on the next turn.
+            for raw in llm_resp.reasoning_items:
+                history.append(LLMMessage(role="reasoning", content="", raw_item=raw))
+
             # Append assistant turn (carries all tool calls for this step)
             history.append(
                 LLMMessage(

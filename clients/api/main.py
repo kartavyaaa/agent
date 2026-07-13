@@ -7,7 +7,10 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from clients.api.error_handlers import register_error_handlers
+from clients.api.routes.chat import router as chat_router
 from clients.api.routes.health import router as health_router
+from clients.api.routes.memories import router as memories_router
 from clients.api.routes.reminders import router as reminders_router
 from core.config import get_settings
 from core.engine import CoreEngine
@@ -81,5 +84,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Personal AI Platform", lifespan=lifespan)
+register_error_handlers(app)
 app.include_router(health_router)
 app.include_router(reminders_router, prefix="/v1")
+app.include_router(chat_router, prefix="/v1")
+app.include_router(memories_router, prefix="/v1")

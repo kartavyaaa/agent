@@ -3,11 +3,20 @@
 IMPORTANT: This is the only file in the codebase that may import from `openai`.
 All callers use the LLMProvider interface from core.llm.base.
 
-Translation notes (Responses API):
-  - LLMMessage list → input[] array of typed Items
-  - role="tool_result" → {"type": "function_call_output", "call_id": ..., "output": str}
+Translation notes (Responses API) — verified against SDK types 2026-07-13:
+  - LLMMessage list → input[] array of typed Items (FLAT list, no nesting)
+  - role="user"/"system" → {"role": ..., "content": str}  (EasyInputMessage)
+  - role="assistant" with tool_calls → one {"type":"function_call", "call_id":...,
+      "name":..., "arguments":JSON_STRING} item PER tool call (top-level, NOT in
+      a message content array — the Responses API rejects "function_call" as a
+      content-block type)
+  - role="tool_result" → {"type":"function_call_output", "call_id":..., "output":str}
+  - role="reasoning" → raw_item dict echoed verbatim (reasoning items from reasoning
+      models must be included in subsequent turns)
   - item.arguments is a JSON STRING — must json.loads() before use
   - output must always be a string (JSON-serialise dicts)
+  - response.output items: "message" (content=[output_text|refusal]),
+      "function_call", "reasoning" — unknown types are silently skipped
 """
 
 from __future__ import annotations
@@ -70,7 +79,10 @@ class OpenAIProvider(LLMProvider):
         tools: list[LLMTool] | None,
         config: LLMConfig,
     ) -> LLMResponse:
-        input_items = [_to_item(m) for m in messages]
+        # _to_items returns a flat list; assistant tool-call turns expand to N items.
+        input_items: list[dict[str, object]] = []
+        for m in messages:
+            input_items.extend(_to_items(m))
         tool_defs = _to_tool_defs(tools) if tools else NOT_GIVEN
 
         try:
@@ -79,7 +91,7 @@ class OpenAIProvider(LLMProvider):
                 input=input_items,
                 tools=tool_defs,
                 tool_choice=config.tool_choice if tools else NOT_GIVEN,
-                temperature=config.temperature,
+                temperature=config.temperature if config.temperature is not None else NOT_GIVEN,
             )
         except openai.RateLimitError as exc:
             raise LLMRateLimitError(str(exc)) from exc
@@ -88,6 +100,7 @@ class OpenAIProvider(LLMProvider):
 
         tool_calls: list[LLMToolCall] = []
         content: str | None = None
+        reasoning_items: list[dict[str, object]] = []
 
         for item in response.output:
             if item.type == "function_call":
@@ -99,7 +112,21 @@ class OpenAIProvider(LLMProvider):
                     ) from exc
                 tool_calls.append(LLMToolCall(id=item.call_id, name=item.name, arguments=args))
             elif item.type == "message":
-                content = "".join(c.text for c in item.content if hasattr(c, "text"))
+                # content items are ResponseOutputText (type="output_text") or refusals
+                content = "".join(
+                    c.text for c in item.content if getattr(c, "type", None) == "output_text"
+                )
+            elif item.type == "reasoning":
+                # Reasoning models emit chain-of-thought items; echo them back verbatim
+                # in the next turn so the model preserves context (SDK docs requirement).
+                reasoning_items.append(
+                    {
+                        "type": "reasoning",
+                        "id": item.id,
+                        "summary": [{"type": s.type, "text": s.text} for s in (item.summary or [])],
+                    }
+                )
+            # All other item types (web_search_call, file_search_call, etc.) are ignored.
 
         usage = TokenUsage(
             input_tokens=response.usage.input_tokens,
@@ -114,6 +141,7 @@ class OpenAIProvider(LLMProvider):
             model=response.model,
             usage=usage,
             raw_response_id=response.id,
+            reasoning_items=reasoning_items,
         )
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
@@ -153,29 +181,38 @@ class OpenAIProvider(LLMProvider):
         return ["gpt-5.5", "gpt-5.4-nano", "gpt-5.4-mini"]
 
 
-def _to_item(msg: LLMMessage) -> dict:  # type: ignore[type-arg]
-    """Translate one LLMMessage to a Responses API input item."""
+def _to_items(msg: LLMMessage) -> list[dict[str, object]]:
+    """Translate one LLMMessage to one or more Responses API input items.
+
+    Returns a list because an assistant turn with N tool calls expands to N
+    top-level function_call items — the Responses API does NOT accept
+    "function_call" as a content-block type inside a message.
+    """
     if msg.role == "tool_result":
         output = msg.content if isinstance(msg.content, str) else json.dumps(msg.content)
-        return {
-            "type": "function_call_output",
-            "call_id": msg.tool_call_id,
-            "output": output,
-        }
+        return [
+            {
+                "type": "function_call_output",
+                "call_id": msg.tool_call_id,
+                "output": output,
+            }
+        ]
+    if msg.role == "reasoning":
+        # Echo verbatim reasoning item back to the model.
+        assert msg.raw_item is not None, "reasoning LLMMessage must carry raw_item"
+        return [msg.raw_item]
     if msg.role == "assistant" and msg.tool_calls:
-        return {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "function_call",
-                    "call_id": tc.id,
-                    "name": tc.name,
-                    "arguments": json.dumps(tc.arguments),
-                }
-                for tc in msg.tool_calls
-            ],
-        }
-    return {"role": msg.role, "content": msg.content}
+        # Each tool call becomes a separate top-level function_call item.
+        return [
+            {
+                "type": "function_call",
+                "call_id": tc.id,
+                "name": tc.name,
+                "arguments": json.dumps(tc.arguments),
+            }
+            for tc in msg.tool_calls
+        ]
+    return [{"role": msg.role, "content": msg.content}]
 
 
 def _to_tool_defs(tools: list[LLMTool]) -> list[dict]:  # type: ignore[type-arg]

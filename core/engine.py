@@ -6,6 +6,7 @@ from typing import Any
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from clients.user_helper import get_or_create_user
 from core.config import Settings
 from core.llm.base import LLMConfig, LLMMessage, LLMProvider
 from core.memory.manager import MemoryManager
@@ -44,6 +45,10 @@ class CoreEngine:
         self._session_factory = session_factory
         self._settings = settings
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._session_factory
+
     async def handle_request(self, request: CoreRequest) -> CoreResponse:
         log = structlog.get_logger().bind(
             user_id=str(request.user_id),
@@ -51,6 +56,7 @@ class CoreEngine:
         )
         async with self._session_factory() as db:
             try:
+                await get_or_create_user(db, request.user_id)
                 result = await self._process(request, db, log)
                 await db.commit()
                 return result

@@ -11,6 +11,34 @@ from core.llm.base import LLMTool
 from plugins.base import PluginBase
 
 
+def _normalize_for_openai_strict(schema: dict[str, Any]) -> None:
+    """Recursively enforce OpenAI strict function-calling requirements on all object nodes.
+
+    Two rules applied at every object node:
+    - additionalProperties=false (Pydantic never emits this)
+    - required must list every key in properties (Pydantic omits defaulted fields)
+
+    Both rules apply to nested $defs and items so future plugins with nested
+    objects don't silently produce malformed schemas.
+
+    Must be called AFTER user_id has been stripped from properties so it is
+    not re-introduced into required.
+    """
+    if schema.get("type") == "object" or "properties" in schema:
+        schema.setdefault("additionalProperties", False)
+        props = schema.get("properties", {})
+        if props:
+            schema["required"] = list(props.keys())
+    for sub in schema.get("properties", {}).values():
+        if isinstance(sub, dict):
+            _normalize_for_openai_strict(sub)
+    for sub in schema.get("$defs", {}).values():
+        if isinstance(sub, dict):
+            _normalize_for_openai_strict(sub)
+    if isinstance(schema.get("items"), dict):
+        _normalize_for_openai_strict(schema["items"])
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._plugins: dict[str, PluginBase] = {}
@@ -29,6 +57,7 @@ class ToolRegistry:
             required = schema.get("required", [])
             if "user_id" in required:
                 required.remove("user_id")
+            _normalize_for_openai_strict(schema)
             tools.append(
                 LLMTool(
                     name=plugin.name,

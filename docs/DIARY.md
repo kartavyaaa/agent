@@ -2,6 +2,161 @@
 
 ---
 
+## 2026-07-13 — Slice 3d: REST chat route, memories read route, error handlers
+
+**What was built:**
+
+- `clients/user_helper.py`: `get_or_create_user(db, user_id)` — race-safe upsert using
+  `INSERT … ON CONFLICT DO NOTHING` (postgresql dialect). Two-select pattern handles the race
+  where concurrent requests arrive with the same new `user_id`: both execute the conflict-safe
+  insert, both read back the row. Does not commit — caller owns the session lifecycle. No FastAPI
+  coupling; reusable from any async context including the Telegram client.
+- `core/engine.py`: `handle_request()` now calls `get_or_create_user(db, request.user_id)`
+  inside the engine's own session before `_process()` runs. This satisfies FK constraints on
+  `memories.user_id` and `reminders.user_id` in the same transaction — no more 500 on first
+  contact. Added a public `session_factory` property to eliminate private `_session_factory`
+  access from routes.
+- `clients/api/dependencies.py`: `get_session_factory(engine)` — canonical helper using the
+  public property, so all new routes avoid underscore access.
+- `clients/api/error_handlers.py`: Single `platform_error_handler` covering all `PlatformError`
+  subclasses via isinstance chain (most-specific first). `SandboxViolationError` → 403 with
+  path suppressed in both response and logs. All 4xx/5xx return `{error, detail}` JSON with
+  safe, non-leaking messages. Registered via `register_error_handlers(app)`.
+- `clients/api/routes/chat.py`: `POST /v1/chat` — pure thin translator. Body: `{user_id,
+  content}`. Builds `CoreRequest`, calls `engine.handle_request()`, returns `CoreResponse`.
+  Zero DB access in the route.
+- `clients/api/routes/memories.py`: `GET /v1/memories?user_id=…&memory_type=…&limit=…` — direct
+  DB read (no engine, no LLM). `MemoryRow` response model explicitly excludes `embedding` (pgvector
+  `Vector(1536)` is not JSON-serializable). `memory_type` typed as `Literal[…]` — FastAPI
+  validates before the query. Orders by `created_at desc`, limit 1–100 (default 20).
+- `tests/clients/test_api_routes.py`: 11 route-level tests. All error-mapping tests raise
+  exceptions from `mock_engine.handle_request` (not injected directly in the route), validating
+  the full dispatch path through the engine boundary. Sandbox violation test asserts the secret
+  path does not appear anywhere in the response body.
+
+**What failed and why:**
+
+- `_make_memory()` in tests constructed `Memory(...)` without `created_at`. The ORM has only a
+  `server_default=func.now()` (no Python-side default), so the field was `None`. Pydantic's
+  `model_validate` rejected it. Fixed by passing `created_at=datetime.now(UTC)` explicitly.
+- Ruff UP017: `timezone.utc` → `UTC` alias. Auto-fixed by `ruff --fix`.
+- ggshield pre-commit hook requires GitGuardian API key (not available on VM). Commit staged
+  but not pushed. Will go through on PC after `ggshield auth login` or with `--no-verify`
+  (no secrets in these files — pure logic).
+
+**Key design decisions:**
+
+- **Engine owns the session, not the route.** Moving `get_or_create_user` into
+  `handle_request()` keeps the FK guarantee in one transaction and keeps the route a pure
+  thin translator. The alternative (route opens its own session, commits user, then calls engine)
+  would be business logic in the client and requires fragile two-session ordering.
+- **`get_or_create_user` in `clients/`, not `core/`.** It is a shared client-layer utility, not
+  core business logic. The engine imports it; core does not depend on clients. This is an
+  intentional layering choice: the function handles the HTTP/Telegram concern of "what user is
+  this?" and the engine invokes it. If this feels wrong at Phase 5 (when real auth arrives),
+  migrate to `core/auth.py` — but for now the dependency direction is acceptable.
+- **`metadata_` serialization.** SQLAlchemy maps `metadata_` (Python) → `"metadata"` (DB
+  column). Pydantic `from_attributes=True` reads the Python attribute name directly — no alias
+  needed. Field named `metadata_` in `MemoryRow` serializes to `"metadata_"` in the JSON
+  response (not `"metadata"`). This is correct for API consumers; renaming would require a
+  Pydantic alias if the API contract requires `"metadata"`. Deferred.
+- **`user_id` is caller-trusted until Phase 5.** `get_or_create_user` auto-creates a `User`
+  row for any UUID that arrives. This is intentional: with no auth, there is no meaningful way
+  to reject a `user_id`. Phase 5 adds API key verification and ties the key to a known `User`.
+
+**Deferred (with rationale):**
+
+- `clients/api/routes/tasks.py` — `Task` model and DB table exist, but there is no tasks
+  plugin, no task manager, and no business logic above the ORM. A route without the layer above
+  it violates the thin-route rule. Defer to a slice that implements `TaskManager` +
+  `CreateTaskPlugin` together with the route.
+- `clients/api/routes/projects.py` — same situation as tasks. Defer.
+- `POST /v1/memories` — writing memories directly via REST must go through `MemoryManager.write()`
+  for the embedding pipeline (OpenAI call + importance scoring). A direct `db.add(Memory(...))`
+  bypasses this and leaves records without embeddings. No product requirement yet. Defer.
+
+**Quality gate (VM, provisional):** ruff ✓ (3 auto-fixes: import order, UP017) · black ✓
+(3.11 AST check degraded — expected) · mypy ✓ (106 source files, 0 errors) ·
+pytest 113/113 unit ✓ · 4 skipped (integration, Docker not on VM) · commit PENDING (ggshield
+hook needs auth on PC).
+
+**Authoritative run PENDING on PC:**
+```bash
+# Commit (ggshield auth should work on PC):
+git commit -m "feat: REST chat route, memories read route, error handlers (Slice 3d)"
+
+pytest -v   # incl. integration + schema equivalence — must still show 0 drift
+docker compose up --build   # /health → 200; worker must not crash-loop
+
+# Smoke tests (first end-to-end over HTTP):
+curl -s -X POST http://localhost:8000/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "00000000-0000-0000-0000-000000000001", "content": "search the web for Python 3.13 features"}' \
+  | jq '{content, tool_calls_made}'
+# expect: tool_calls_made includes "web_search"
+
+curl -s -X POST http://localhost:8000/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "00000000-0000-0000-0000-000000000001", "content": "read ../../../../etc/passwd"}' \
+  | jq '{error, detail}'
+# expect: {"error": "access_denied", "detail": "Access denied."} — NOT 500, path NOT in response
+
+curl -s "http://localhost:8000/v1/memories?user_id=00000000-0000-0000-0000-000000000001" \
+  | jq 'length'
+# expect: >= 1 (engine wrote episodic memory for the chat above)
+```
+
+---
+
+## 2026-07-13 — Multi-turn tool-call serialization fix (Responses API)
+
+**Bug found and fixed post-Slice-3d during live end-to-end testing.**
+
+**What failed:**
+The second LLM turn of a ReAct loop was rejected by OpenAI with:
+`400: Invalid value: 'function_call'. Supported values are 'input_text', 'input_image'...`
+
+**Root cause:**
+`_to_item` serialized an assistant message with tool calls as a regular message item with the
+tool call embedded in a content block. The Responses API does NOT accept `function_call` as a
+content-block type — prior function calls must be SEPARATE TOP-LEVEL items with
+`{"type": "function_call", ...}`. This is fundamentally different from Chat Completions, where
+tool calls live inside a message object. Tool outputs (`function_call_output`) were already
+correct; only the prior function calls were wrong.
+
+**Why mocks hid this:**
+Unit tests mock `responses.create` entirely and never validate the shape of `input[]`. The broken
+path only triggers on iteration 2+ of a ReAct loop — invisible until a real two-step API call.
+
+**What was fixed:**
+- Renamed `_to_item` to `_to_items` (returns `list[dict]`): an assistant turn with N tool calls
+  expands to N separate `function_call` items in the flat `input[]` array.
+- Added reasoning item collection and verbatim echo-back for reasoning models
+  (`LLMMessage.raw_item`, `LLMResponse.reasoning_items`, `role="reasoning"` in `LLMMessage`).
+- Response parsing now checks `getattr(c, "type", None) == "output_text"` instead of
+  `hasattr(c, "text")` — refusal items also have `.text` and must not be concatenated.
+- `temperature=NOT_GIVEN` when `config.temperature is None` (GPT-5 family rejects the param).
+
+**Tests added (8 new):**
+- `test_to_items_*` sync tests: no mock API, just `_to_items()` output shape verification.
+  Cover function_call expansion, call_id pairing, reasoning passthrough, EasyInputMessage shape.
+- `test_complete_reasoning_items_collected` and `test_complete_unknown_output_items_ignored`:
+  async tests with realistic Responses API response shapes.
+- Fixed `_make_message_response` helper: content items now carry `type="output_text"` to match
+  real API shape (old mock had no `.type` attr; new parser requires it).
+
+**Key insight for future work on openai_provider.py:**
+This file is the highest-risk file for mock-hidden bugs. Every Responses API shape detail
+(input item types, output item types, content sub-types) is invisible to mocks. Real multi-step
+API calls are the only reliable gate for serialization correctness. Prefer adding sync
+serialization-only tests (`_to_items` calls) over relying on mock-`complete()` integration tests.
+
+**Authoritative gate (PC required):**
+pytest -v (127+ tests), docker compose up --build, then POST /v1/chat with a web_search prompt
+and verify tool_calls_made == ["web_search"] with non-empty content.
+
+---
+
 ## 2026-07-12 — Slice 3b: file_reader plugin + local_fs integration
 
 **What was built:**

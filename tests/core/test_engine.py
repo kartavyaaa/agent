@@ -55,6 +55,10 @@ def _make_engine(
     mock_db.rollback = AsyncMock()
     mock_db.add = MagicMock()
     mock_db.flush = AsyncMock()
+    # get_or_create_user calls await db.execute(...) — return an existing user so no insert fires
+    _mock_exec_result = MagicMock()
+    _mock_exec_result.scalar_one_or_none.return_value = MagicMock()  # truthy = user found
+    mock_db.execute = AsyncMock(return_value=_mock_exec_result)
 
     # session_factory is an async context manager that yields mock_db
     mock_factory = MagicMock()
@@ -82,7 +86,7 @@ def _make_engine(
     mock_settings = MagicMock()
     mock_settings.openai_default_model = "gpt-5.5"
     mock_settings.planner_max_iterations = 8
-    mock_settings.planner_default_temperature = 0.7
+    mock_settings.planner_default_temperature = None
 
     engine = CoreEngine(
         llm=mock_llm,

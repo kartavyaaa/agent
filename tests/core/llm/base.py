@@ -14,12 +14,10 @@ class LLMToolCall(BaseModel):
 
 
 class LLMMessage(BaseModel):
-    role: Literal["system", "user", "assistant", "tool_result", "reasoning"]
+    role: Literal["system", "user", "assistant", "tool_result"]
     content: str | list[dict]  # type: ignore[type-arg]
     tool_call_id: str | None = None  # set when role=tool_result
     tool_calls: list[LLMToolCall] | None = None  # set when role=assistant with tool calls
-    # raw_item: opaque Responses API item dict echoed verbatim (role=reasoning only)
-    raw_item: dict | None = None  # type: ignore[type-arg]
 
 
 class LLMTool(BaseModel):
@@ -56,8 +54,6 @@ class LLMResponse(BaseModel):
     model: str
     usage: TokenUsage
     raw_response_id: str
-    # Opaque reasoning items from reasoning models; must be echoed back in next turn.
-    reasoning_items: list[dict] = []  # type: ignore[type-arg]
 
 
 class LLMChunk(BaseModel):
