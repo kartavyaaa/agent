@@ -2,6 +2,52 @@
 
 ---
 
+## 2026-07-13 — Slice: bot-as-a-service + prod compose override (Option 4 deploy prep)
+
+**What was built:**
+
+- `docker-compose.yml`: added `bot` service. Uses same `infra/docker/Dockerfile` image as `app`.
+  Command is `python -m clients.telegram` — no migration step, no shell wrapper. Long-polling loop
+  (`aiogram dp.start_polling`) keeps the container alive. Env block mirrors `app` exactly.
+  No restart policy in base (local dev doesn't need it).
+- `docker-compose.prod.yml`: new override for 1GB VM + Neon Postgres. Disables `db` via
+  `profiles: [donotstart]`. Adds `restart: unless-stopped` to redis/app/worker/bot. Nulls out
+  `db` from each service's `depends_on` using `db: ~` — critical because Compose merges `depends_on`
+  maps and omitting a key does NOT remove it.
+
+**Key insight — depends_on override mechanics:**
+Compose v2 merges `depends_on` maps by key. To remove the `db` dependency in the prod override
+you must explicitly set `db: ~` (YAML null) for each service. A plain redeclaration listing only
+`redis` would silently merge and keep `db`, causing a startup error against the profiled-off db
+service.
+
+**Key insight — profiles + depends_on interaction:**
+The `db: ~` null in `depends_on` removes the dependency before Compose evaluates whether the
+profiled service is active. Run `docker compose -f docker-compose.yml -f docker-compose.prod.yml config`
+first to confirm the merged output shows no `db` under any service's `depends_on`. If that
+command errors on the profile/depends_on interaction, fallback is to drop the `profiles` block
+from the override's `db` entry (the `db: ~` nulling is what actually matters for correctness).
+
+**DB_PASSWORD on prod host:** `docker-compose.yml` uses `${DB_PASSWORD}` (no default). Compose
+emits a warning (not an error) if unset on the prod host — safe to ignore since `db` doesn't start.
+
+**Correction — depends_on removal via merge tricks is unreliable (docker/compose #11980, #12162):**
+`db: ~` null-on-merge and `!reset` both failed in practice — `config` errored with "service X
+depends on undefined service db". Fix 1 applied instead: add `required: false` to the `db`
+entry in `depends_on` in the base file for app/worker/bot. With `required: false`, Compose
+silently skips the dependency when `db` is not present (profiled off) rather than erroring.
+The prod override is now clean — it only sets `profiles: [donotstart]` on db and restart
+policies; no depends_on manipulation needed in the override at all. Local dev is unaffected:
+db is present and healthy, so `required: false` is a no-op and Compose waits for it normally.
+
+**Deferred to PC for authoritative verification:**
+- `docker compose ... config` pre-flight to validate merged profile/depends_on output.
+- Local `docker compose up` with 5 services (db+redis+app+worker+bot) all Up.
+- Prod `docker compose -f ... -f ... up` with DATABASE_URL=Neon: no db container, alembic
+  no-ops, /health 200, /v1/chat works, bot responds from phone, restart policies confirmed.
+
+---
+
 ## 2026-07-13 — Slice: user timezone (display + interpretation)
 
 **What was built:**

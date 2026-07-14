@@ -1,0 +1,27 @@
+# Production override — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+#
+# Postgres is on Neon (DATABASE_URL in .env). The local db service is not started.
+# db is placed behind a profile that is never activated so it does not consume RAM.
+# app/worker/bot have required:false on their db depends_on in the base file, so
+# Compose starts them without waiting for db when it is not present.
+#
+# Validate before first `up`:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+
+services:
+  db:
+    profiles:
+      - donotstart
+
+  redis:
+    restart: unless-stopped
+
+  app:
+    restart: unless-stopped
+
+  worker:
+    restart: unless-stopped
+
+  bot:
+    restart: unless-stopped

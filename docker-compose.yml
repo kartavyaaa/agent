@@ -28,6 +28,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
     environment:
@@ -56,6 +57,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
     environment:
@@ -72,6 +74,31 @@ services:
     volumes:
       - ./data/files:/app/files:ro
     command: python -m arq infra.worker.worker_settings.WorkerSettings
- 
+
+  bot:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL
+      - REDIS_URL
+      - OPENAI_API_KEY
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_WEBHOOK_SECRET
+      - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
+      - ENVIRONMENT=production
+    volumes:
+      - ./data/files:/app/files:ro
+    command: python -m clients.telegram
+
 volumes:
   pgdata: {}
