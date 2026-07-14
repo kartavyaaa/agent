@@ -174,6 +174,7 @@ async def test_reminder_round_trip(
     settings.openai_embedding_model = "text-embedding-3-small"
     settings.planner_max_iterations = 8
     settings.planner_default_temperature = 0.7
+    settings.default_timezone = "Asia/Kolkata"
 
     memory = MemoryManager(llm=mock_llm, settings=settings)
     registry = ToolRegistry()

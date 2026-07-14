@@ -2,6 +2,83 @@
 
 ---
 
+## 2026-07-13 — Slice: user timezone (display + interpretation)
+
+**What was built:**
+
+- `core/timeutil.py`: `format_local(dt_utc, tz_name) -> str` — single display helper. Converts a
+  UTC datetime to the named IANA zone via stdlib `zoneinfo`. Accepts naive datetimes (assumes UTC).
+  Falls back to UTC on invalid `tz_name` (catches `ZoneInfoNotFoundError` and `KeyError`). Format:
+  `"YYYY-MM-DD HH:MM ZZZ"` (e.g. `"2026-07-14 05:30 IST"`).
+- `core/config.py`: `default_timezone: str = "Asia/Kolkata"` added to `Settings`.
+- `pyproject.toml`: `tzdata>=2024.1` added to production dependencies — required by `zoneinfo` on
+  Windows dev machines and slim Linux containers that lack a system IANA database.
+- `core/engine.py`: `_SYSTEM_PROMPT` updated. The LLM is now told the user's timezone name and
+  local time, and is explicitly instructed to interpret user times in that zone but emit `remind_at`
+  as absolute UTC ISO. The naive=UTC fallback in the reminders plugin stays correct because the
+  contract guarantees the LLM always emits UTC.
+- `plugins/reminders/plugin.py`: `__init__(self, tz_name: str = "UTC")` added. Confirmation
+  message now calls `format_local(remind_at, self._tz_name)` instead of hardcoding "UTC". Plugin
+  never calls `get_settings()` — timezone is injected at wiring time.
+- `clients/wiring.py`: `RemindersPlugin(tz_name=s.default_timezone)` — single wiring point.
+- `clients/api/routes/memories.py`: `MemoryRow` gains `created_at_local`, `last_accessed_at_local`,
+  `expires_at_local` string fields (default `""`/`None`). Route body calls `get_settings()` once
+  per request (lru_cache singleton) and populates them via `format_local`.
+- `clients/api/routes/reminders.py`: `ReminderRow` gains `remind_at_local`, `sent_at_local`,
+  `created_at_local` string fields. Same route-body population pattern.
+- `docker-compose.yml`: `DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}` added to both `app`
+  and `worker` environment blocks.
+- `.env.example`: `DEFAULT_TIMEZONE=Asia/Kolkata` placeholder added.
+- New `tests/core/test_timeutil.py`: 5 unit tests covering UTC→IST, date rollover (22:00 UTC →
+  next-day IST), naive input, invalid zone fallback, UTC identity.
+- Updated `tests/core/test_engine.py`: `mock_settings.default_timezone = "Asia/Kolkata"` added
+  to `_make_engine()`; `test_system_prompt_contains_utc_time` renamed to
+  `test_system_prompt_contains_timezone_info` and updated to assert timezone name and local-format
+  timestamp appear in the system message.
+- Updated `tests/plugins/test_reminders.py`: all `RemindersPlugin()` → `RemindersPlugin(tz_name="UTC")`;
+  new `test_execute_confirmation_shows_local_time` asserts UTC 09:00 → IST 14:30 in confirmation.
+- Updated `tests/clients/test_api_routes.py`: `autouse` fixture patches
+  `clients.api.routes.memories.get_settings` and `clients.api.routes.reminders.get_settings` so
+  tests don't need a real `.env`.
+
+**What failed and why:**
+
+- First `core/timeutil.py` draft used `ZoneInfo | type[UTC]` as the type annotation for `tz`.
+  mypy rejected it — `UTC` is a `timezone` instance, not a type alias. Fixed to `ZoneInfo | timezone`.
+- `tests/core/test_engine.py` system-prompt test had an inline `import re` and a ternary that made
+  mypy infer `str | list[...]` for `system_msg.content`. Fixed by hoisting `import re` to the top
+  and using an explicit `content: str` local.
+- `test_memories_happy_path` failed at runtime because the route now calls `get_settings()`, which
+  tries to parse `.env` (absent in the test environment). Fixed with an `autouse` pytest fixture that
+  patches both route modules' `get_settings` references.
+- `patch_get_settings` fixture initially typed as `pytest.MonkeyPatch` with `# type: ignore` —
+  mypy flagged unused ignores. Fixed to `Generator[None, None, None]`.
+
+**Key design decisions:**
+
+- **Plugin injection over global config**: `RemindersPlugin` takes `tz_name` in `__init__`, never
+  calls `get_settings()`. This means tests need no patching — just pass `tz_name="UTC"`.
+- **Route-body formatting, not model validator**: `get_settings()` is called in the route function
+  body after `model_validate`, not in a Pydantic `model_validator`. Keeps config-fetching out of
+  the data schema layer.
+- **Add-local-field approach**: raw UTC ISO fields in `MemoryRow`/`ReminderRow` are unchanged —
+  API consumers relying on them are unaffected. `*_local` string fields are additive.
+- **`tzdata` is a hard dependency**: Without it, `ZoneInfo("Asia/Kolkata")` raises on Windows and
+  slim containers. Added to production deps, not just dev.
+
+**Deferred — requires PC + live LLM:**
+
+- **Live smoke test**: Send "remind me at 9am tomorrow" via bot/POST. Verify `remind_at` in DB is
+  `03:30 UTC` (9am IST - 5:30h), NOT `09:00 UTC`. Confirmation message must read IST. GET
+  /v1/reminders must return `remind_at_local` in IST. This is the off-by-5:30 bug; mocked unit
+  tests cannot catch it — only the stored UTC value vs. intended local time does.
+- **`%Z` abbreviation on PC + container**: `strftime("%Z")` should render "IST" but may render
+  "+0530" on some Windows builds. Verify with `format_local(datetime(2026,7,14,0,0,tzinfo=UTC),
+  "Asia/Kolkata")` == `"2026-07-14 05:30 IST"` on the PC and inside the Docker container. If
+  it renders an offset, switch `abbr = local.strftime("%Z")` to `abbr = local.tzname() or "UTC"`.
+
+---
+
 ## 2026-07-13 — Slice 3d: REST chat route, memories read route, error handlers
 
 **What was built:**

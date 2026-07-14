@@ -1,8 +1,11 @@
 pyproject.toml
 clients/__init__.py
+clients/user_helper.py
+clients/wiring.py
 clients/api/__init__.py
 clients/api/auth.py
 clients/api/dependencies.py
+clients/api/error_handlers.py
 clients/api/main.py
 clients/api/routes/__init__.py
 clients/api/routes/chat.py
@@ -14,6 +17,7 @@ clients/api/routes/tasks.py
 clients/cli/__init__.py
 clients/cli/main.py
 clients/telegram/__init__.py
+clients/telegram/__main__.py
 clients/telegram/bot.py
 clients/telegram/formatters.py
 clients/telegram/handlers.py
@@ -24,6 +28,7 @@ core/engine.py
 core/exceptions.py
 core/logging.py
 core/schemas.py
+core/timeutil.py
 core/llm/__init__.py
 core/llm/base.py
 core/llm/openai_provider.py

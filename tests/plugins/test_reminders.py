@@ -46,7 +46,7 @@ def test_reminder_input_has_no_user_id() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_creates_reminder_row() -> None:
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     db = _make_db()
     uid = uuid.uuid4()
     remind_at = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
@@ -66,7 +66,7 @@ async def test_execute_creates_reminder_row() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_returns_correct_output() -> None:
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     db = _make_db()
     remind_at = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
 
@@ -84,7 +84,7 @@ async def test_execute_returns_correct_output() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_message_and_confirmation_are_distinct() -> None:
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     db = _make_db()
     remind_at = datetime(2026, 7, 9, 14, 30, tzinfo=UTC)
 
@@ -103,7 +103,7 @@ async def test_execute_message_and_confirmation_are_distinct() -> None:
 @pytest.mark.asyncio
 async def test_execute_naive_datetime_gets_utc() -> None:
     """A naive datetime from the LLM must be treated as UTC."""
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     db = _make_db()
     naive_dt = datetime(2026, 7, 8, 9, 0)  # no tzinfo
 
@@ -118,7 +118,7 @@ async def test_execute_naive_datetime_gets_utc() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_flushes_to_get_id() -> None:
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     db = _make_db()
 
     await plugin.execute(
@@ -140,7 +140,31 @@ async def test_execute_flushes_to_get_id() -> None:
 
 @pytest.mark.asyncio
 async def test_health_check_healthy() -> None:
-    plugin = RemindersPlugin()
+    plugin = RemindersPlugin(tz_name="UTC")
     status = await plugin.health_check()
     assert status.status == "healthy"
     assert status.checked_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Timezone display
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_confirmation_shows_local_time() -> None:
+    """Confirmation must show local time, not the raw UTC value."""
+    # UTC 09:00 → IST 14:30 (UTC+5:30)
+    plugin = RemindersPlugin(tz_name="Asia/Kolkata")
+    db = _make_db()
+    remind_at = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+
+    result = await plugin.execute(
+        ReminderInput(message="call Bob", remind_at=remind_at),
+        user_id=uuid.uuid4(),
+        db=db,
+    )
+
+    assert "14:30" in result.confirmation
+    assert "IST" in result.confirmation
+    assert "09:00" not in result.confirmation

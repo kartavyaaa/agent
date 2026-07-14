@@ -18,6 +18,7 @@ Requires-Dist: structlog>=24.0
 Requires-Dist: tenacity>=8.3
 Requires-Dist: aiogram>=3.10
 Requires-Dist: typer>=0.12
+Requires-Dist: tzdata>=2024.1
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.23; extra == "dev"

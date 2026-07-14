@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     environment: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
     cors_origins: list[str] = []
+    default_timezone: str = "Asia/Kolkata"
 
 
 @lru_cache

@@ -7,8 +7,9 @@ and unittest.mock. No Docker required.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Generator
 from datetime import UTC
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -31,6 +32,22 @@ from models.memory import Memory
 # ---------------------------------------------------------------------------
 
 _USER_ID = uuid.uuid4()
+
+
+def _mock_settings() -> MagicMock:
+    s = MagicMock()
+    s.default_timezone = "UTC"
+    return s
+
+
+@pytest.fixture(autouse=True)
+def patch_get_settings() -> Generator[None, None, None]:
+    """Prevent route-level get_settings() calls from trying to read a real .env."""
+    with (
+        patch("clients.api.routes.memories.get_settings", return_value=_mock_settings()),
+        patch("clients.api.routes.reminders.get_settings", return_value=_mock_settings()),
+    ):
+        yield
 
 
 def _make_mock_engine(response: CoreResponse | None = None) -> MagicMock:

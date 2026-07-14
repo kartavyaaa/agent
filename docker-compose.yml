@@ -39,6 +39,7 @@ services:
       - SERPER_API_KEY
       - FILE_READER_ROOT=/app/files
       - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
       - ENVIRONMENT=production
     volumes:
       - ./data/files:/app/files:ro
@@ -66,6 +67,7 @@ services:
       - SERPER_API_KEY
       - FILE_READER_ROOT=/app/files
       - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
       - ENVIRONMENT=production
     volumes:
       - ./data/files:/app/files:ro

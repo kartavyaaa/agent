@@ -5,6 +5,7 @@ LLM, registry, memory, and DB session are all mocked.
 
 from __future__ import annotations
 
+import re
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -87,6 +88,7 @@ def _make_engine(
     mock_settings.openai_default_model = "gpt-5.5"
     mock_settings.planner_max_iterations = 8
     mock_settings.planner_default_temperature = None
+    mock_settings.default_timezone = "Asia/Kolkata"
 
     engine = CoreEngine(
         llm=mock_llm,
@@ -211,16 +213,20 @@ async def test_handle_request_no_commit_on_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_system_prompt_contains_utc_time() -> None:
+async def test_system_prompt_contains_timezone_info() -> None:
     engine, _, mock_llm, _ = _make_engine()
 
     await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
 
     call_args = mock_llm.complete.call_args
-    messages: list[LLMMessage] = call_args[1]["messages"] if call_args[1] else call_args[0][0]
+    kwargs = call_args[1] if call_args[1] else {}
+    messages: list[LLMMessage] = kwargs["messages"] if kwargs else call_args[0][0]
     system_msg = next(m for m in messages if m.role == "system")
-    # System prompt must include a UTC timestamp so relative times resolve
-    assert "UTC" in system_msg.content
+    content: str = system_msg.content  # type: ignore[assignment]
+    # System prompt must include the user's timezone name and a local timestamp
+    assert "Asia/Kolkata" in content
+    # Local time format: "YYYY-MM-DD HH:MM ZZZ"
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} \w+", content)
 
 
 # ---------------------------------------------------------------------------

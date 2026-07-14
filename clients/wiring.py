@@ -54,7 +54,7 @@ async def build_engine(
     )
     memory = MemoryManager(llm=llm, settings=s)
     registry = ToolRegistry()
-    registry.register(RemindersPlugin())
+    registry.register(RemindersPlugin(tz_name=s.default_timezone))
 
     serper_client: SerperClient | None = None
     if s.serper_api_key is not None:

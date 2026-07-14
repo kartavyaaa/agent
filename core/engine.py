@@ -12,13 +12,18 @@ from core.llm.base import LLMConfig, LLMMessage, LLMProvider
 from core.memory.manager import MemoryManager
 from core.planner.react import ReActPlanner
 from core.schemas import CoreRequest, CoreResponse
+from core.timeutil import format_local
 from core.tools.registry import ToolRegistry
 
 _SYSTEM_PROMPT = (
     "You are a personal AI assistant. "
-    "Today's date and time (UTC) is {now}. "
+    "The user's timezone is {tz}. "
+    "The current local time in the user's timezone is {now_local}. "
     "You have access to the following tools: {tools}. "
     "Use them whenever they help fulfill the user's request. "
+    "When the user mentions a time, interpret it in their timezone ({tz}). "
+    "When calling create_reminder, always emit remind_at as an absolute UTC ISO timestamp "
+    "(e.g. 2026-07-14T03:30:00Z). "
     "When all necessary actions are complete, reply directly to the user."
 )
 
@@ -70,13 +75,14 @@ class CoreEngine:
         db: AsyncSession,
         log: Any,
     ) -> CoreResponse:
-        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        tz_name = self._settings.default_timezone
+        now_local = format_local(datetime.now(UTC), tz_name)
         tools = self._registry.get_tools_for_llm()
         tool_names = ", ".join(t.name for t in tools) or "none"
 
         system_msg = LLMMessage(
             role="system",
-            content=_SYSTEM_PROMPT.format(now=now_str, tools=tool_names),
+            content=_SYSTEM_PROMPT.format(now_local=now_local, tz=tz_name, tools=tool_names),
         )
         user_msg = LLMMessage(role="user", content=request.content)
 

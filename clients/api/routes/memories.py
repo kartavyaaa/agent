@@ -10,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clients.api.dependencies import get_session_factory
+from core.config import get_settings
+from core.timeutil import format_local
 from models.memory import Memory
 
 router = APIRouter()
@@ -25,6 +27,10 @@ class MemoryRow(BaseModel):
     created_at: datetime
     last_accessed_at: datetime | None
     expires_at: datetime | None
+    # Human-readable local-time fields (additive — raw UTC ISO fields unchanged)
+    created_at_local: str = ""
+    last_accessed_at_local: str | None = None
+    expires_at_local: str | None = None
 
     # embedding is intentionally excluded — pgvector Vector(1536) is not JSON-serializable
     model_config = ConfigDict(from_attributes=True)
@@ -48,4 +54,14 @@ async def list_memories(
             q = q.where(Memory.memory_type == memory_type)
         result = await db.execute(q)
         rows = result.scalars().all()
-    return [MemoryRow.model_validate(r) for r in rows]
+    tz = get_settings().default_timezone
+    rows_out: list[MemoryRow] = []
+    for r in rows:
+        row = MemoryRow.model_validate(r)
+        row.created_at_local = format_local(r.created_at, tz)
+        row.last_accessed_at_local = (
+            format_local(r.last_accessed_at, tz) if r.last_accessed_at else None
+        )
+        row.expires_at_local = format_local(r.expires_at, tz) if r.expires_at else None
+        rows_out.append(row)
+    return rows_out
