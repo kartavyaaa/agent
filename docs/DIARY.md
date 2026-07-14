@@ -752,3 +752,5 @@ Slice 3a DIARY entry trimmed in sync — restored here.
 **Quality gate (PC, authoritative):** pytest -v ✓ (all integration tests ran including schema
 equivalence and full flow) · docker compose up --build ✓ · /health → 200 · web_search smoke
 test with real SERPER_API_KEY returned results.
+
+**Neon free tier validated as production DB** — pgvector + HNSW migration applies cleanly, asyncpg connects (direct endpoint, no sslmode param), embedding write/read verified against Neon. Watch: scale-to-zero + 100 compute-hrs/month; every-minute reminder poll keeps DB awake — monitor usage.
