@@ -1,12 +1,11 @@
 """Telegram bot entry point — thin translator.
 
-The engine and telegram_user_map are injected via Dispatcher kwargs so that
+engine and session_factory are injected via Dispatcher kwargs so that
 handlers receive them as typed parameters without importing from core directly.
 """
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -31,12 +30,12 @@ def build_bot() -> Bot:
     )
 
 
-async def run_polling(engine: Any, telegram_user_map: dict[int, uuid.UUID]) -> None:
+async def run_polling(engine: Any, session_factory: Any) -> None:
     """Start long-polling (development / VM mode).
 
-    engine and telegram_user_map are injected into every handler via
+    engine and session_factory are injected into every handler via
     Dispatcher's workflow_data kwargs.
     """
     bot = build_bot()
     dp = build_dispatcher()
-    await dp.start_polling(bot, engine=engine, telegram_user_map=telegram_user_map)
+    await dp.start_polling(bot, engine=engine, session_factory=session_factory)

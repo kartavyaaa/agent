@@ -108,6 +108,95 @@ curl -s "http://localhost:8000/v1/memories?user_id=00000000-0000-0000-0000-00000
 
 ---
 
+## 2026-07-13 — Slice 3c: Telegram client (long-polling)
+
+**What was built:**
+
+- `clients/user_helper.py`: Added `get_or_create_user_by_telegram_id(db, telegram_id) -> uuid.UUID`.
+  Race-safe: SELECT → INSERT ON CONFLICT DO NOTHING (on `telegram_id`) → re-SELECT **by
+  `telegram_id`**. The re-SELECT key is the critical difference from the UUID helper: if this
+  request lost the insert race, the locally-generated `new_id` was discarded by ON CONFLICT and
+  will not exist; only `telegram_id` is guaranteed to be present in the winning row.
+- `clients/telegram/formatters.py`: Three functions: `escape_html` (& first, then < and >),
+  `split_message` (newline-preferred split; hard-split fallback), `format_response`
+  (escape-then-split — order is load-bearing: `&` → `&amp;` expands 1→5 chars, so splitting on
+  unescaped length would produce chunks that exceed 4096 after escaping).
+- `clients/telegram/handlers.py`: Replaced `telegram_user_map` dict stub. Handler now opens its
+  own mini-session, calls `get_or_create_user_by_telegram_id`, commits, then calls
+  `engine.handle_request` (same path as `/v1/chat`). `format_response` applied to all outgoing
+  content. Removed "account not linked" error branch — auto-creation makes it obsolete.
+- `clients/telegram/bot.py`: `run_polling(engine, session_factory)` — removed `telegram_user_map`
+  parameter; `session_factory` injected via Dispatcher workflow_data kwargs instead.
+- `clients/wiring.py`: New shared engine builder `build_engine(s) -> (sql_engine, factory, core,
+  serper_client)`. Extracted from `main.py`'s lifespan so both FastAPI and the Telegram bot
+  construct the engine identically without duplication. Returns the serper client separately so
+  callers can call `.aclose()` on shutdown.
+- `clients/api/main.py`: Lifespan now delegates to `build_engine()` — no logic duplication.
+- `clients/telegram/__main__.py`: Entry point: `python -m clients.telegram`. Calls `build_engine`
+  then `run_polling`. Wires the bot for local smoke testing without any plumbing in the REPL.
+- `clients/telegram/middleware.py`: Left as placeholder — no concrete cross-cutting concern for
+  the long-polling MVP. Rate limiting and per-request logging are Phase 5.
+- Tests: `tests/clients/test_user_helper.py` (5 tests — covers both UUID and telegram_id helpers,
+  including a test that documents the 3-call re-SELECT contract); `test_telegram_handlers.py` (5
+  tests — including commit-before-engine ordering test); `test_telegram_formatters.py` (13 tests
+  — including the escape-then-split ordering regression test with 1024 `&` chars).
+
+**What failed and why:**
+
+- `assert result is existing` in test_user_helper used `SimpleNamespace` mocks. mypy strict mode
+  flags identity checks between `User` and `SimpleNamespace` as `[comparison-overlap]`. Fixed by
+  switching `_make_user` helper to return `MagicMock()` (typed `Any` by mypy).
+- ruff auto-fixed 6 unused imports across the three new test files (the `call` import from
+  `unittest.mock` and `pytest` redundant marks).
+- black reformatted 3 files (trailing-comma and blank-line style).
+
+**Key design decisions:**
+
+- **Re-SELECT by `telegram_id`, not `new_id`**: The UUID helper re-selects by `id` because the
+  caller supplies the `id` and that IS the conflict target. Here the conflict target is
+  `telegram_id`; on a race loss the `new_id` is discarded by postgres and doesn't exist. This is
+  a subtle but critical difference.
+- **Two mini-sessions**: Handler commits the user upsert in its own session before calling
+  `engine.handle_request`. The engine opens a second session for its own `get_or_create_user`
+  call (finds the already-committed row by UUID). The extra PK lookup is trivially cheap and
+  keeps the engine interface client-agnostic.
+- **escape-then-split order**: `format_response` escapes first so that split boundaries are
+  computed against the final Telegram-bound byte count. Inverting this order is a subtle bug where
+  content within the limit before escaping can exceed it after.
+- **`clients/wiring.py` as shared builder**: Both the FastAPI lifespan and the Telegram
+  `__main__.py` now call `build_engine()`. This eliminates copy-paste drift between the two
+  entry points and ensures plugin registration is always identical.
+
+**Deferred (with rationale):**
+
+- **Markdown → Telegram HTML rendering**: The LLM returns Markdown (`**bold**`, backtick code,
+  `[link](url)`). With `ParseMode.HTML`, these render as literal asterisks and brackets. Safe and
+  non-crashing for this slice. A converter that turns `**text**` → `<b>text</b>` etc. is a
+  polish item — do not build until there's a concrete product requirement.
+- **Webhook mode + TELEGRAM_WEBHOOK_SECRET validation**: Phase 4. `telegram_webhook_url = None`
+  means long-polling until Caddy is live on the Oracle VM.
+- **Bot containerization in docker-compose**: Phase 4. The bot is a third long-running process;
+  add it as a service when webhook mode is implemented.
+- **`middleware.py` implementation**: Phase 5. No concrete cross-cutting concern yet.
+
+**Quality gate (VM, provisional):** ruff ✓ (6 auto-fixes: unused imports) · black ✓ (3.11
+degraded check — expected) · mypy ✓ (113 source files, 0 errors) · pytest 154/154 unit ✓ ·
+1 skipped (symlink test, env limitation) · 3 deselected (integration, Docker not on VM).
+
+**Authoritative run PENDING on PC:**
+```bash
+pytest -v   # incl. integration + schema equivalence — must still show 0 drift
+docker compose up --build   # /health → 200; worker must not crash-loop
+
+# Local smoke test (long-polling):
+python -m clients.telegram
+# Message from phone: "search the web for Python 3.13 features"
+# Message: "remind me to call Bob in 5 minutes"
+# Message: "what is 2 + 2" with <html> tags to verify escape doesn't break replies
+```
+
+---
+
 ## 2026-07-13 — Multi-turn tool-call serialization fix (Responses API)
 
 **Bug found and fixed post-Slice-3d during live end-to-end testing.**
