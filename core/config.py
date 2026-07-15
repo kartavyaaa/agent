@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     telegram_bot_token: SecretStr
     telegram_webhook_secret: SecretStr
     telegram_webhook_url: str | None = None  # None → long-polling (dev)
+    telegram_allowed_user_ids: str = ""  # comma-separated numeric IDs; empty = block all
+
+    @property
+    def telegram_allowed_user_ids_set(self) -> frozenset[int]:
+        raw = self.telegram_allowed_user_ids.strip()
+        if not raw:
+            return frozenset()
+        return frozenset(int(part) for part in raw.split(",") if part.strip())
 
     # Integrations
     serper_api_key: SecretStr | None = None
@@ -60,6 +68,10 @@ class Settings(BaseSettings):
 
     # Memory / history
     conversation_history_turns: int = 10
+    semantic_recall_enabled: bool = True
+    semantic_recall_top_k: int = 5
+    semantic_recall_max_distance: float = 0.35
+    semantic_recall_inject_count: int = 3
 
     # App
     environment: Literal["development", "staging", "production"] = "development"

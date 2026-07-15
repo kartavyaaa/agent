@@ -53,13 +53,16 @@ def _make_engine(content: str = "Hi!") -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+_ALLOWED: frozenset[int] = frozenset({12345})  # matches _make_message default from_user_id
+
+
 @pytest.mark.asyncio
 async def test_handle_message_no_text_skips() -> None:
     msg = _make_message(text=None)
     engine = _make_engine()
     factory = _make_session_factory(uuid.uuid4())
 
-    await handle_message(msg, engine, factory)
+    await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
 
     engine.handle_request.assert_not_awaited()
     msg.answer.assert_not_awaited()
@@ -71,7 +74,7 @@ async def test_handle_message_no_from_user_skips() -> None:
     engine = _make_engine()
     factory = _make_session_factory(uuid.uuid4())
 
-    await handle_message(msg, engine, factory)
+    await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
 
     engine.handle_request.assert_not_awaited()
     msg.answer.assert_not_awaited()
@@ -88,7 +91,7 @@ async def test_handle_message_routes_to_engine() -> None:
         "clients.telegram.handlers.get_or_create_user_by_telegram_id",
         new=AsyncMock(return_value=uid),
     ) as mock_lookup:
-        await handle_message(msg, engine, factory)
+        await handle_message(msg, engine, factory, allowed_user_ids=frozenset({42}))
 
     mock_lookup.assert_awaited_once()
     assert mock_lookup.call_args[0][1] == 42  # telegram_id arg
@@ -129,7 +132,7 @@ async def test_handle_message_commits_before_engine_call() -> None:
         "clients.telegram.handlers.get_or_create_user_by_telegram_id",
         new=AsyncMock(return_value=uid),
     ):
-        await handle_message(msg, engine, factory)
+        await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
 
     assert call_order == [
         "commit",
@@ -149,9 +152,54 @@ async def test_handle_message_long_response_multi_answer() -> None:
         "clients.telegram.handlers.get_or_create_user_by_telegram_id",
         new=AsyncMock(return_value=uid),
     ):
-        await handle_message(msg, engine, factory)
+        await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
 
     assert msg.answer.await_count > 1, "long response must be sent in multiple chunks"
     for call_args in msg.answer.call_args_list:
         chunk = call_args[0][0]
         assert len(chunk) <= 4096, f"chunk length {len(chunk)} exceeds 4096"
+
+
+# ---------------------------------------------------------------------------
+# Allowlist tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_allowed_user_passes() -> None:
+    uid = uuid.uuid4()
+    msg = _make_message(text="hello", from_user_id=42)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_message(msg, engine, factory, allowed_user_ids=frozenset({42}))
+
+    engine.handle_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_allowed_user_silently_ignored() -> None:
+    msg = _make_message(text="hello", from_user_id=99)
+    engine = _make_engine()
+    factory = _make_session_factory(uuid.uuid4())
+
+    await handle_message(msg, engine, factory, allowed_user_ids=frozenset({42}))
+
+    engine.handle_request.assert_not_awaited()
+    msg.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_allowlist_blocks_all() -> None:
+    msg = _make_message(text="hello", from_user_id=12345)
+    engine = _make_engine()
+    factory = _make_session_factory(uuid.uuid4())
+
+    await handle_message(msg, engine, factory, allowed_user_ids=frozenset())
+
+    engine.handle_request.assert_not_awaited()
+    msg.answer.assert_not_awaited()

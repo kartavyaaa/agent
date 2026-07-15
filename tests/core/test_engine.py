@@ -13,6 +13,7 @@ import pytest
 
 from core.engine import CoreEngine
 from core.llm.base import LLMMessage, LLMResponse, LLMToolCall, TokenUsage
+from core.memory.manager import ScoredMemory
 from core.schemas import CoreRequest, CoreResponse
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ def _make_engine(
     mock_memory = MagicMock()
     mock_memory.write = AsyncMock(return_value=MagicMock())
     mock_memory.get_recent = AsyncMock(return_value=[])
+    mock_memory.semantic_search = AsyncMock(return_value=[])
 
     mock_settings = MagicMock()
     mock_settings.openai_default_model = "gpt-5.5"
@@ -91,6 +93,10 @@ def _make_engine(
     mock_settings.planner_default_temperature = None
     mock_settings.default_timezone = "Asia/Kolkata"
     mock_settings.conversation_history_turns = 10
+    mock_settings.semantic_recall_enabled = True
+    mock_settings.semantic_recall_top_k = 5
+    mock_settings.semantic_recall_max_distance = 0.35
+    mock_settings.semantic_recall_inject_count = 3
 
     engine = CoreEngine(
         llm=mock_llm,
@@ -303,3 +309,71 @@ async def test_get_recent_called_with_correct_user_and_limit() -> None:
     call_kwargs = mock_memory.get_recent.call_args.kwargs
     assert call_kwargs["user_id"] == uid
     assert call_kwargs["limit"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Semantic recall injection
+# ---------------------------------------------------------------------------
+
+
+def _scored_mem(content: str, distance: float) -> ScoredMemory:
+    m = MagicMock()
+    m.content = content
+    return ScoredMemory(memory=m, distance=distance)
+
+
+def _get_system_prompt(mock_llm: MagicMock) -> str:
+    call_args = mock_llm.complete.call_args
+    kwargs = call_args[1] if call_args[1] else {}
+    messages: list[LLMMessage] = kwargs["messages"] if kwargs else call_args[0][0]
+    content: str = next(m for m in messages if m.role == "system").content  # type: ignore[assignment]
+    return content
+
+
+@pytest.mark.asyncio
+async def test_recall_block_injected_when_below_threshold() -> None:
+    engine, _, mock_llm, _, mock_memory = _make_engine()
+    mock_memory.semantic_search = AsyncMock(
+        return_value=[_scored_mem("User: pottery\nAssistant: nice!", 0.2)]
+    )
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="gift idea?"))
+
+    assert "Relevant past context" in _get_system_prompt(mock_llm)
+    assert "User: pottery" in _get_system_prompt(mock_llm)
+
+
+@pytest.mark.asyncio
+async def test_recall_block_absent_when_above_threshold() -> None:
+    engine, _, mock_llm, _, mock_memory = _make_engine()
+    mock_memory.semantic_search = AsyncMock(
+        return_value=[_scored_mem("User: pottery\nAssistant: nice!", 0.5)]
+    )
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="gift idea?"))
+
+    assert "Relevant past context" not in _get_system_prompt(mock_llm)
+
+
+@pytest.mark.asyncio
+async def test_recall_not_called_when_disabled() -> None:
+    engine, _, _, _, mock_memory = _make_engine()
+    engine._settings.semantic_recall_enabled = False
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
+
+    mock_memory.semantic_search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recall_dedupes_recent_history() -> None:
+    shared_content = "User: pottery\nAssistant: nice!"
+    engine, _, mock_llm, _, mock_memory = _make_engine()
+    # Same content appears in both recent history and semantic recall
+    mock_memory.get_recent = AsyncMock(return_value=[_fake_mem(shared_content)])
+    mock_memory.semantic_search = AsyncMock(return_value=[_scored_mem(shared_content, 0.1)])
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="gift idea?"))
+
+    # Should NOT inject a separate recall block — already in recent history
+    assert "Relevant past context" not in _get_system_prompt(mock_llm)

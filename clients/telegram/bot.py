@@ -30,12 +30,21 @@ def build_bot() -> Bot:
     )
 
 
-async def run_polling(engine: Any, session_factory: Any) -> None:
+async def run_polling(
+    engine: Any,
+    session_factory: Any,
+    allowed_user_ids: frozenset[int],
+) -> None:
     """Start long-polling (development / VM mode).
 
-    engine and session_factory are injected into every handler via
-    Dispatcher's workflow_data kwargs.
+    engine, session_factory, and allowed_user_ids are injected into every
+    handler via Dispatcher's workflow_data kwargs.
     """
     bot = build_bot()
     dp = build_dispatcher()
-    await dp.start_polling(bot, engine=engine, session_factory=session_factory)
+    await dp.start_polling(
+        bot,
+        engine=engine,
+        session_factory=session_factory,
+        allowed_user_ids=allowed_user_ids,
+    )

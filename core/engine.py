@@ -90,9 +90,34 @@ class CoreEngine:
             lines = "\n".join(m.content for m in recent)
             history_block = f"\n\nRecent conversation history (oldest to newest):\n{lines}"
 
+        recall_block = ""
+        if self._settings.semantic_recall_enabled:
+            scored = await self._memory.semantic_search(
+                db,
+                user_id=request.user_id,
+                query=request.content,
+                top_k=self._settings.semantic_recall_top_k,
+                memory_types=["episodic"],
+            )
+            log.debug(
+                "recall.distances",
+                distances=[round(s.distance, 4) for s in scored],
+            )
+            recent_contents = {m.content for m in recent}
+            hits = [
+                s
+                for s in scored
+                if s.distance <= self._settings.semantic_recall_max_distance
+                and s.memory.content not in recent_contents
+            ][: self._settings.semantic_recall_inject_count]
+            if hits:
+                lines = "\n".join(h.memory.content for h in hits)
+                recall_block = "\n\nRelevant past context (may or may not be useful):\n" + lines
+
         system_msg = LLMMessage(
             role="system",
             content=_SYSTEM_PROMPT.format(now_local=now_local, tz=tz_name, tools=tool_names)
+            + recall_block
             + history_block,
         )
         user_msg = LLMMessage(role="user", content=request.content)

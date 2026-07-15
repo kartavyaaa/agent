@@ -28,9 +28,19 @@ async def main() -> None:
     log = structlog.get_logger()
 
     sql_engine, session_factory, core, serper_client = await build_engine(s)
+
+    allowed = s.telegram_allowed_user_ids_set
+    if not allowed:
+        log.warning(
+            "telegram.allowlist.empty",
+            detail="bot will ignore ALL incoming messages — set TELEGRAM_ALLOWED_USER_IDS",
+        )
+    else:
+        log.info("telegram.allowlist.loaded", count=len(allowed))
+
     log.info("telegram_bot.starting", mode="long-polling")
     try:
-        await run_polling(core, session_factory)
+        await run_polling(core, session_factory, allowed_user_ids=allowed)
     finally:
         if serper_client is not None:
             await serper_client.aclose()

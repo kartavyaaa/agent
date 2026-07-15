@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.memory.manager import MemoryManager, _heuristic
+from core.memory.manager import MemoryManager, ScoredMemory, _heuristic
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,22 +132,25 @@ def test_heuristic_working() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_db_rows(*pairs: tuple[SimpleNamespace, float]) -> MagicMock:
+    """Return a mock db whose execute().all() yields Row-like objects with .Memory and .dist."""
+    fake_rows = [SimpleNamespace(Memory=mem, dist=dist) for mem, dist in pairs]
+    mock_result = MagicMock()
+    mock_result.all.return_value = fake_rows
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=mock_result)
+    return db
+
+
 @pytest.mark.asyncio
 async def test_semantic_search_embeds_query_once() -> None:
     manager = _make_manager()
-    db = MagicMock()
-
-    # Build two fake Memory rows
     row_a = SimpleNamespace(last_accessed_at=None)
     row_b = SimpleNamespace(last_accessed_at=None)
-
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [row_a, row_b]
-    db.execute = AsyncMock(return_value=mock_result)
+    db = _make_db_rows((row_a, 0.2), (row_b, 0.4))
 
     await manager.semantic_search(db, user_id=uuid.uuid4(), query="remind me")
 
-    # embed called exactly once for the query text
     _mock_llm(manager).embed.assert_called_once()
     call_args = _mock_llm(manager).embed.call_args
     assert call_args[0][0] == ["remind me"]
@@ -156,16 +159,29 @@ async def test_semantic_search_embeds_query_once() -> None:
 @pytest.mark.asyncio
 async def test_semantic_search_updates_last_accessed() -> None:
     manager = _make_manager()
-    db = MagicMock()
-
     row = SimpleNamespace(last_accessed_at=None)
-    mock_result = MagicMock()
-    mock_result.scalars.return_value.all.return_value = [row]
-    db.execute = AsyncMock(return_value=mock_result)
+    db = _make_db_rows((row, 0.3))
 
-    await manager.semantic_search(db, user_id=uuid.uuid4(), query="test")
+    result = await manager.semantic_search(db, user_id=uuid.uuid4(), query="test")
 
-    assert row.last_accessed_at is not None
+    assert result[0].memory.last_accessed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_returns_scored_pairs() -> None:
+    manager = _make_manager()
+    row_a = SimpleNamespace(last_accessed_at=None)
+    row_b = SimpleNamespace(last_accessed_at=None)
+    db = _make_db_rows((row_a, 0.1), (row_b, 0.45))
+
+    result = await manager.semantic_search(db, user_id=uuid.uuid4(), query="test")
+
+    assert len(result) == 2
+    assert all(isinstance(r, ScoredMemory) for r in result)
+    assert result[0].distance == 0.1
+    assert result[1].distance == 0.45
+    assert result[0].memory is row_a  # type: ignore[comparison-overlap]
+    assert result[1].memory is row_b  # type: ignore[comparison-overlap]
 
 
 # ---------------------------------------------------------------------------
