@@ -12,8 +12,9 @@ import structlog
 from aiogram import Router
 from aiogram.types import Message
 
-from clients.telegram.formatters import format_response
+from clients.errors import _GENERIC_FALLBACK, user_message
 from clients.user_helper import get_or_create_user_by_telegram_id
+from core.exceptions import PlatformError
 from core.schemas import CoreRequest, CoreResponse  # only public types
 
 log = structlog.get_logger()
@@ -41,10 +42,25 @@ async def handle_message(
         await db.commit()
 
     request = CoreRequest(user_id=user_id, content=message.text)
-    response: CoreResponse = await engine.handle_request(request)
-    chunks = format_response(response.content)
-    if not chunks:
-        await message.answer(_FALLBACK)
-    else:
-        for chunk_text, chunk_entities in chunks:
-            await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
+    try:
+        response: CoreResponse = await engine.handle_request(request)
+        from clients.telegram.formatters import (  # lazy: import only on success path; keeps error paths importable without telegramify_markdown
+            format_response,
+        )
+
+        chunks = format_response(response.content)
+        if not chunks:
+            await message.answer(_FALLBACK)
+        else:
+            for chunk_text, chunk_entities in chunks:
+                await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
+    except PlatformError as exc:
+        log.warning(
+            "telegram.handle_message.platform_error",
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
+        await message.answer(user_message(exc))
+    except Exception:
+        log.exception("telegram.handle_message.unexpected_error")
+        await message.answer(_GENERIC_FALLBACK)

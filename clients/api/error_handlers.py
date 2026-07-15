@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from clients.errors import user_message
 from core.exceptions import (
     ConfigurationError,
     FileDecodeError,
@@ -35,29 +36,17 @@ async def platform_error_handler(request: Request, exc: PlatformError) -> JSONRe
 
     # Most-specific subclasses first to respect MRO.
     if isinstance(exc, PlannerMaxIterationsError):
-        status, code, msg = 422, "planner_too_complex", "Request is too complex to complete."
+        status, code = 422, "planner_too_complex"
     elif isinstance(exc, PlannerStuckLoopError):
-        status, code, msg = 422, "planner_stuck", "Request caused a planning loop."
+        status, code = 422, "planner_stuck"
     elif isinstance(exc, LLMRateLimitError):
-        status, code, msg = (
-            429,
-            "llm_rate_limit",
-            "AI provider rate limit reached. Try again later.",
-        )
+        status, code = 429, "llm_rate_limit"
     elif isinstance(exc, LLMTimeoutError):
-        status, code, msg = 504, "llm_timeout", "AI provider timed out. Try again later."
+        status, code = 504, "llm_timeout"
     elif isinstance(exc, PluginNotImplementedError):
-        status, code, msg = (
-            501,
-            "plugin_not_implemented",
-            "Requested capability is not yet implemented.",
-        )
+        status, code = 501, "plugin_not_implemented"
     elif isinstance(exc, PluginValidationError):
-        status, code, msg = (
-            422,
-            "plugin_validation_error",
-            "Plugin input or output failed validation.",
-        )
+        status, code = 422, "plugin_validation_error"
     elif isinstance(exc, SandboxViolationError):
         # Never include path in response or logs — prevents information disclosure.
         log.warning(
@@ -68,37 +57,33 @@ async def platform_error_handler(request: Request, exc: PlatformError) -> JSONRe
         )
         return JSONResponse(
             status_code=403,
-            content=ErrorResponse(error="access_denied", detail="Access denied.").model_dump(),
+            content=ErrorResponse(error="access_denied", detail=user_message(exc)).model_dump(),
         )
     elif isinstance(exc, FileNotFoundInSandboxError):
-        status, code, msg = 422, "file_not_found", "Requested file was not found."
+        status, code = 422, "file_not_found"
     elif isinstance(exc, PathIsDirectoryError):
-        status, code, msg = 422, "path_is_directory", "Requested path is a directory, not a file."
+        status, code = 422, "path_is_directory"
     elif isinstance(exc, FileTooLargeError):
-        status, code, msg = 422, "file_too_large", "Requested file exceeds the size limit."
+        status, code = 422, "file_too_large"
     elif isinstance(exc, FileDecodeError):
-        status, code, msg = 422, "file_decode_error", "File content could not be decoded."
+        status, code = 422, "file_decode_error"
     elif isinstance(exc, FileReaderError):
-        status, code, msg = 422, "file_reader_error", "File read failed."
+        status, code = 422, "file_reader_error"
     elif isinstance(exc, IntegrationRateLimitError):
-        status, code, msg = (
-            429,
-            "integration_rate_limit",
-            "External service rate limit reached. Try again later.",
-        )
+        status, code = 429, "integration_rate_limit"
     elif isinstance(exc, IntegrationError):
-        status, code, msg = 502, "integration_error", "External service error."
+        status, code = 502, "integration_error"
     elif isinstance(exc, ConfigurationError):
-        status, code, msg = 503, "configuration_error", "Service is misconfigured. Contact support."
+        status, code = 503, "configuration_error"
     else:
-        status, code, msg = 500, "internal_error", "An unexpected error occurred."
+        status, code = 500, "internal_error"
 
     level = log.warning if status < 500 else log.error
     level("error_handler", exc_type=type(exc).__name__, status=status, code=code)
 
     return JSONResponse(
         status_code=status,
-        content=ErrorResponse(error=code, detail=msg).model_dump(),
+        content=ErrorResponse(error=code, detail=user_message(exc)).model_dump(),
     )
 
 
