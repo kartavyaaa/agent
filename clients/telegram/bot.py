@@ -10,7 +10,6 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
 from clients.telegram.handlers import router
 from core.config import get_settings
@@ -26,7 +25,7 @@ def build_bot() -> Bot:
     s = get_settings()
     return Bot(
         token=s.telegram_bot_token.get_secret_value(),
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        default=DefaultBotProperties(),
     )
 
 

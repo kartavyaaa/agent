@@ -11,8 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from clients.telegram.handlers import handle_message
-from core.schemas import CoreResponse
+pytest.importorskip(
+    "telegramify_markdown",
+    reason="telegramify-markdown not installed (PC-gate item; run pip install -e '.[dev]' on PC)",
+)
+
+from clients.telegram.handlers import handle_message  # noqa: E402
+from core.schemas import CoreResponse  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,7 +106,10 @@ async def test_handle_message_routes_to_engine() -> None:
     assert req.user_id == uid
     assert req.content == "Hello bot"
 
-    msg.answer.assert_awaited_once_with("Hi there!")
+    # Entity path: positional arg is text, parse_mode=None passed explicitly
+    call_args = msg.answer.call_args
+    assert call_args.args[0] == "Hi there!"
+    assert call_args.kwargs.get("parse_mode") is None
 
 
 @pytest.mark.asyncio
@@ -156,8 +164,9 @@ async def test_handle_message_long_response_multi_answer() -> None:
 
     assert msg.answer.await_count > 1, "long response must be sent in multiple chunks"
     for call_args in msg.answer.call_args_list:
-        chunk = call_args[0][0]
-        assert len(chunk) <= 4096, f"chunk length {len(chunk)} exceeds 4096"
+        chunk_text = call_args.args[0]
+        utf16_len = len(chunk_text.encode("utf-16-le")) // 2
+        assert utf16_len <= 4096, f"chunk exceeds 4096 UTF-16 units: {utf16_len}"
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +212,45 @@ async def test_empty_allowlist_blocks_all() -> None:
 
     engine.handle_request.assert_not_awaited()
     msg.answer.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Fallback for empty / whitespace engine response
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_response_sends_fallback() -> None:
+    """Empty LLM output must produce the fallback message, never an empty send."""
+    uid = uuid.uuid4()
+    msg = _make_message(text="hello")
+    engine = _make_engine(content="")
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
+
+    msg.answer.assert_awaited_once()
+    sent_text = msg.answer.call_args.args[0]
+    assert sent_text == "(No response.)"
+    assert sent_text  # never empty
+
+
+@pytest.mark.asyncio
+async def test_whitespace_response_sends_fallback() -> None:
+    uid = uuid.uuid4()
+    msg = _make_message(text="hello")
+    engine = _make_engine(content="   ")
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_message(msg, engine, factory, allowed_user_ids=_ALLOWED)
+
+    msg.answer.assert_awaited_once()
+    assert msg.answer.call_args.args[0] == "(No response.)"

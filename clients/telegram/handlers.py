@@ -19,6 +19,8 @@ from core.schemas import CoreRequest, CoreResponse  # only public types
 log = structlog.get_logger()
 router = Router()
 
+_FALLBACK = "(No response.)"
+
 
 @router.message()
 async def handle_message(
@@ -40,5 +42,9 @@ async def handle_message(
 
     request = CoreRequest(user_id=user_id, content=message.text)
     response: CoreResponse = await engine.handle_request(request)
-    for chunk in format_response(response.content):
-        await message.answer(chunk)
+    chunks = format_response(response.content)
+    if not chunks:
+        await message.answer(_FALLBACK)
+    else:
+        for chunk_text, chunk_entities in chunks:
+            await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)

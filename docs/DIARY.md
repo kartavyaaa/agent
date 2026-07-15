@@ -2,6 +2,75 @@
 
 ---
 
+## 2026-07-15 — Slice: Markdown rendering via entity path (telegramify-markdown)
+
+**What was built:**
+
+- `clients/telegram/formatters.py`: Fully replaced the HTML-escape + split approach with
+  `telegramify_markdown.convert()` + `telegramify_markdown.split_entities()` — the library's
+  entity path. `format_response(content)` now returns `list[tuple[str, list[MessageEntity]]]`
+  instead of `list[str]`. The text is plain UTF-8; all formatting (bold, italic, code, links)
+  is carried as structured `aiogram.types.MessageEntity` objects. No MarkdownV2 escaping step
+  anywhere — "can't parse entities" failures are structurally impossible. Private helper
+  `_to_aiogram(lib_entity)` converts the library's `MessageEntity` to aiogram's via
+  `model_validate(lib_entity.to_dict())`.
+- `clients/telegram/handlers.py`: Updated the send loop to unpack `(chunk_text, chunk_entities)`
+  and call `message.answer(chunk_text, entities=chunk_entities, parse_mode=None)`. Added
+  `_FALLBACK = "(No response.)"` — if `format_response` returns `[]` (empty/whitespace LLM
+  output), sends the fallback rather than making no reply or passing empty text (Telegram
+  rejects empty text with 400).
+- `clients/telegram/bot.py`: Removed `parse_mode=ParseMode.MARKDOWN_V2` from
+  `DefaultBotProperties` (and dropped the now-unused `ParseMode` import). Handlers pass
+  `parse_mode=None` per-call, so the bot-level default is irrelevant and its presence was
+  confusing.
+- `pyproject.toml`: `telegramify-markdown>=1.0.0` added to production dependencies.
+- `tests/clients/test_telegram_formatters.py`: Fully rewritten. Old HTML-escaping tests
+  removed. New entity-contract tests: bold → entity with type="bold", inline code → type="code",
+  code block → type="pre" + language="python", plain text no bold/italic entities, bullet list
+  text preserved, `_to_aiogram` field preservation, empty/whitespace → `[]`, UTF-16 chunk limit
+  enforced, entity offsets within chunk bounds. `pytest.importorskip("telegramify_markdown")` at
+  top — VM skips since lib can't be installed there.
+- `tests/clients/test_telegram_handlers.py`: Updated two assertions for the new call signature
+  (`call_args.args[0]` for text, `call_args.kwargs.get("parse_mode") is None`, UTF-16 length
+  check). Added two new tests: `test_empty_response_sends_fallback` and
+  `test_whitespace_response_sends_fallback` — verify `"(No response.)"` sent, never empty string.
+
+**Why entity path over MarkdownV2 string path:**
+The first implementation (committed in the prior session) used `telegramify_markdown.telegramify()`
+and extracted `.content` — but `.content` is deprecated. More importantly, the MarkdownV2
+string path has an unavoidable escaping layer: any character that needs escaping must be
+prefixed with `\`, and if the split or the library gets the escaping wrong, Telegram rejects
+the whole message. The entity path has no escaping: Telegram reads the plain text as-is and
+uses the entity objects to know where to apply bold, code, etc. No escaping = no escape bugs.
+
+**Empty-content bug caught in plan review:**
+Initial plan returned `[("", [])]` for empty content — the handler would then call
+`message.answer("", ...)` which Telegram rejects with 400. Corrected to return `[]` and handle
+in the handler with a fallback message.
+
+**VM-dep note:**
+`telegramify-markdown` cannot be installed on the VM (TLS restriction). The formatter and
+handler tests skip via `pytest.importorskip`. All 156 other tests pass. PC-gate is required:
+`pip install -e ".[dev]"` then `pytest -v` (the 14 formatter + 8 handler tests must all pass).
+
+**Key invariant:**
+`format_response` must never be called with already-escaped text. It takes raw LLM Markdown
+output and the library handles all encoding internally. The calling chain is:
+`engine response.content` → `format_response()` → `convert()` → `split_entities()` → aiogram send.
+
+**Quality gate (VM, provisional):** ruff ✓ · black ✓ (3.11 AST check degraded — expected) ·
+mypy ✓ (116 source files, 0 errors) · pytest 156/156 unit ✓ · 3 skipped (formatter/handler
+lib-absent) · 3 deselected (integration).
+
+**Authoritative run PENDING on PC:**
+1. `pip install -e ".[dev]"` — picks up `telegramify-markdown>=1.0.0`.
+2. Probe actual API: `python -c "import telegramify_markdown as t; text, ents = t.convert('**bold**'); print(repr(text), ents[0].to_dict())"` — confirm `.to_dict()` keys match aiogram's `MessageEntity` fields and adjust `_to_aiogram` if needed.
+3. `pytest -v` — all tests green including the 14 previously-skipped formatter tests.
+4. `docker compose up --build` — boots, `/health` → 200.
+5. **Live Telegram test (the only real rendering proof):** deploy to Oracle VM, send bot a message that produces bold + a list + a code block, confirm each renders (not literal markers). Then send something long enough to split; confirm no "can't parse entities" error and no garbled chunks.
+
+---
+
 ## 2026-07-14 — Phase 4: DEPLOYED to production (Option 4: E2.1.Micro + Neon + swap)
 
 **Outcome:** Agent is live. Running 24/7 on a free Oracle Always-Free VM, backed by Neon (managed

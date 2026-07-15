@@ -1,42 +1,32 @@
 from __future__ import annotations
 
+import telegramify_markdown
+import telegramify_markdown.entity as tg_entity
+from aiogram.types import MessageEntity
 
-def escape_html(text: str) -> str:
-    """Escape characters that Telegram's HTML parser treats as markup.
+_UTF16_LIMIT = 4096
 
-    Order matters: & must be replaced first so the & in &lt;/&gt; isn't re-escaped.
+
+def _to_aiogram(lib_entity: tg_entity.MessageEntity) -> MessageEntity:
+    return MessageEntity.model_validate(lib_entity.to_dict())
+
+
+def format_response(content: str) -> list[tuple[str, list[MessageEntity]]]:
+    """Convert raw LLM Markdown to (text, entities) chunks for Telegram.
+
+    Uses convert() + split_entities() — the library's entity path.
+    Text is plain UTF-8; entities carry all formatting. No parse_mode needed.
+    Feed RAW LLM markdown; do not pre-escape.
+
+    Returns [] for empty/whitespace content — caller must send a fallback
+    rather than passing empty text to Telegram (which returns 400).
     """
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if not content or not content.strip():
+        return []
 
-
-def split_message(text: str, limit: int = 4096) -> list[str]:
-    """Split text into chunks each at most `limit` characters.
-
-    Prefers splitting at newline boundaries to preserve paragraph structure.
-    Falls back to a hard split when a single line exceeds the limit.
-    Always returns at least one chunk.
-    """
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-        split_at = text.rfind("\n", 0, limit)
-        if split_at == -1:
-            split_at = limit
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-
-    return chunks
-
-
-def format_response(content: str) -> list[str]:
-    """Prepare engine output for Telegram: escape HTML, then split at 4096 chars.
-
-    escape-then-split order is required: split boundaries must reflect the final
-    escaped length (& → &amp; expands 1 char to 5), not the raw content length.
-    """
-    return split_message(escape_html(content))
+    text, lib_entities = telegramify_markdown.convert(content)
+    chunks = telegramify_markdown.split_entities(text, lib_entities, _UTF16_LIMIT)
+    return [
+        (chunk_text, [_to_aiogram(e) for e in chunk_entities])
+        for chunk_text, chunk_entities in chunks
+    ]
