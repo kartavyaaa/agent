@@ -2,6 +2,72 @@
 
 ---
 
+## 2026-07-14 — Phase 4: DEPLOYED to production (Option 4: E2.1.Micro + Neon + swap)
+
+**Outcome:** Agent is live. Running 24/7 on a free Oracle Always-Free VM, backed by Neon (managed
+Postgres), reachable from phone via Telegram, self-healing across reboots, locked down (SSH-in
+only, API not internet-exposed). This is the milestone the project aimed at.
+
+**The hosting journey (why Option 4):**
+
+- **Oracle ARM (Ampere A1)** was the original target (stack runs unchanged on a VM). Blocked by
+  repeated "Out of host capacity" across ADs. PAYG (the reliable capacity fix) demanded a
+  ~138 SGD deposit in this region → rejected as not-free.
+- **Free PaaS tiers evaluated and rejected:** Render (sleeps 15min), Koyeb (sleeps 1hr + one
+  service only + no worker services), Railway (free tier is a trial), Fly.io (no free tier).
+  Root cause: the stack is 5 always-on processes; free PaaS is built for one sleepable web
+  service. The architecture wants a VM.
+- **Option 3 (re-architect to fit free PaaS: drop arq/Redis, in-process scheduler, webhook so
+  sleep is acceptable)** was fully planned but shelved in favor of the simpler Option 4.
+- **Option 4 (chosen): Oracle AMD E2.1.Micro (x86, 1GB) + Postgres offloaded to Neon + swap.**
+  The E2.1.Micro provisions reliably (no ARM capacity fight). Offloading memory-hungry Postgres
+  to Neon makes the 1GB box comfortable; the stack otherwise runs UNCHANGED (no re-architecture).
+
+**VM specs (agent-prod):** Oracle VM.Standard.E2.1.Micro, Ubuntu 24.04, x86_64, 2 vCPU, 954MB RAM,
+45GB disk. Added 2GB swap (/swapfile, persisted via /etc/fstab). Docker Engine 29.6.1 + Compose
+v5.3.1 (get.docker.com; enabled on boot via systemd).
+
+**Deploy facts / gotchas:**
+
+- Memory footprint on the micro: app ~54MB, bot ~178MB, worker ~41MB, redis ~4MB = ~277MB of
+  954MB (~29%), swap untouched. The 1GB box is comfortable once Postgres is on Neon. The 2 vCPUs
+  (not the feared 1/8 OCPU) also make builds tolerable.
+- Deploy flow: prod `.env` lives ONLY on the VM (gitignored, never in repo); `git pull` never
+  touches it. Cloned repo directly from GitHub (VM reaches GitHub — no SharePoint for prod).
+  `mkdir -p data/files` needed before `up` (bind-mount target).
+- Brought up with `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`
+  (MUST use --build — images bake code at build time).
+- **Secrets rotated:** `docker compose config` dumped all env values in plaintext during testing
+  (it's a secret-dumping command by nature). Rotated OpenAI/Serper/Telegram keys afterward.
+- **Firewall: already locked down by Oracle default.** Ingress allows only SSH (22) + two required
+  ICMP rules (Path MTU Discovery — leave them). NO rule for 8000/5432/6379, so the API and Redis
+  are NOT internet-exposed (Oracle is default-deny inbound; publishing 8000 on the Docker
+  interface is irrelevant without a matching ingress rule). Egress = all (needed for
+  bot→Telegram/OpenAI/Serper/Neon). Nothing to change. Did NOT touch host ufw/iptables
+  (Oracle-Ubuntu iptables interaction is a lock-out risk; the cloud security list suffices). SSH
+  left open to 0.0.0.0/0 — key-auth is the real protection and the home IP is dynamic (IP
+  restriction would risk lockout).
+- **Reboot-survival verified:** `sudo reboot` → all 4 services returned automatically (restart
+  policies + Docker-on-boot). Self-healing confirmed. Bot answered from phone after reboot.
+
+**Neon caveat to monitor:** free tier = 0.5GB storage + 100 compute-hrs/month, scale-to-zero. The
+every-minute reminder poll keeps Neon awake → watch compute-hour burn; relax poll interval if needed.
+
+**Known gaps / queue (post-deploy):**
+
+1. **MEMORY RECALL (highest value, next slice):** agent WRITES memories but never READS them back
+   into context. Each Telegram message is an independent `handle_request` with no conversation
+   history injected, and semantic memory search is not wired into the request flow. Result: agent
+   can't remember your name even within one chat. The write path + storage exist; the
+   retrieve-into-context path was never built.
+2. **Telegram allowlist (tiny):** restrict bot to own telegram_id so randoms can't spend API credits.
+3. **Phase 5 auth:** only needed if/when the REST API is exposed publicly (currently not exposed).
+4. **Serper:** 2500 free credits; when exhausted, web_search fails gracefully (typed integration
+   error; everything else keeps working). Paid tier is cheap if ever needed.
+5. **Cleanup:** Markdown→Telegram-HTML rendering, working/knowledge memory layers, tasks/projects routes.
+
+---
+
 ## 2026-07-13 — Slice: bot-as-a-service + prod compose override (Option 4 deploy prep)
 
 **What was built:**

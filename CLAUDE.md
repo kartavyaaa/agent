@@ -72,6 +72,45 @@ If a step can't run for an environmental reason (e.g. no Docker on the VM), say 
 defer it to the PC gate — never fake a pass, and never report a migration/config change "done"
 on the strength of mocked tests alone.
 
+## Production deployment & updating (added Phase 4)
+The agent runs in production on an Oracle Always-Free VM (`agent-prod`, Ubuntu 24.04, x86_64,
+2 vCPU / 954MB RAM + 2GB swap). Postgres is external (Neon); app + worker + bot + redis run on
+the VM via Docker Compose with the prod override (`docker-compose.prod.yml`).
+
+**Three environments:** work VM (authors code, no GitHub/Docker, provisional `/verify` only) →
+PC (authoritative verification + GitHub push; the hub) → Oracle VM (runs verified code pulled
+from GitHub; NOT for dev/debug). Flow: work VM → (SharePoint) → PC → verify → GitHub →
+(git pull) → Oracle VM.
+
+**Deploying a change to production** (after it's committed + pushed from the PC):
+```bash
+ssh -i <key> ubuntu@<vm-ip>
+cd agent
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+- MUST use `--build` for CODE changes — images bake code at build time; a plain `up -d` restarts
+  with OLD code. For DOCS/non-code changes, `git pull` alone suffices (no rebuild, no downtime).
+- Check after: `... ps`, `... logs app | tail -30`. Brief downtime (~30-60s) on rebuild — fine.
+
+**Production rules:**
+- **PC proves correctness; the VM only runs proven code.** Editing files directly on the VM is a
+  smell (not in git, won't survive, unverified). The ONE exception is `.env` (secrets/config),
+  which lives only on the box by design and is never in git — `git pull` never touches it.
+- **Migrations run automatically on deploy** (app startup runs `alembic upgrade head` against
+  Neon). A slice with a schema change WILL migrate production Neon on the next `up --build`. Test
+  migrations hard on the PC against Neon before deploying — a bad migration hits real data.
+- **Rollback = git** (`git checkout <last-good-commit>` + `up -d --build`). Clean for code; but if
+  the bad deploy ran a migration, rolling back code does NOT roll back the schema — extra care on
+  schema changes.
+- **Secrets:** prod `.env` stays on the VM only. If ever exposed (e.g. `docker compose config`
+  prints all env values in plaintext), ROTATE the key.
+- **Firewall:** Oracle security list = SSH-in only, API not internet-exposed, egress open. Don't
+  touch host ufw/iptables (lock-out risk). If the REST API is ever exposed publicly, add Phase 5
+  auth FIRST (user_id is currently body-trusted).
+- **Memory:** micro has headroom (~277MB of 954MB with Postgres on Neon). Check
+  `docker stats --no-stream` after deploys that add processes/deps.
+
 ## Working style
 - For anything ~2+ hours of work, plan first and get my approval before coding.
 - If a decision is ambiguous or costly-to-reverse, ask rather than guess.
