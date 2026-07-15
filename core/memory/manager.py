@@ -70,6 +70,23 @@ class MemoryManager:
             row.last_accessed_at = now
         return rows
 
+    async def get_recent(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        limit: int,
+    ) -> list[Memory]:
+        q = (
+            select(Memory)
+            .where(Memory.user_id == user_id, Memory.memory_type == "episodic")
+            .order_by(Memory.created_at.desc())
+            .limit(limit)
+        )
+        result = await db.execute(q)
+        rows = list(result.scalars().all())
+        return list(reversed(rows))  # oldest-first for chronological reading
+
 
 def _heuristic(content: str, memory_type: MemoryType) -> float:
     if "reminder" in content.lower():

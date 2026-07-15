@@ -80,9 +80,20 @@ class CoreEngine:
         tools = self._registry.get_tools_for_llm()
         tool_names = ", ".join(t.name for t in tools) or "none"
 
+        recent = await self._memory.get_recent(
+            db,
+            user_id=request.user_id,
+            limit=self._settings.conversation_history_turns,
+        )
+        history_block = ""
+        if recent:
+            lines = "\n".join(m.content for m in recent)
+            history_block = f"\n\nRecent conversation history (oldest to newest):\n{lines}"
+
         system_msg = LLMMessage(
             role="system",
-            content=_SYSTEM_PROMPT.format(now_local=now_local, tz=tz_name, tools=tool_names),
+            content=_SYSTEM_PROMPT.format(now_local=now_local, tz=tz_name, tools=tool_names)
+            + history_block,
         )
         user_msg = LLMMessage(role="user", content=request.content)
 
@@ -102,8 +113,7 @@ class CoreEngine:
             db=db,
         )
 
-        memories_written = 0
-        mem = await self._memory.write(
+        await self._memory.write(
             db,
             user_id=request.user_id,
             content=f"User: {request.content}\nAssistant: {plan_result.content}",
@@ -113,8 +123,7 @@ class CoreEngine:
                 "tools": plan_result.tool_calls_made,
             },
         )
-        if mem is not None:
-            memories_written += 1
+        memories_written = 1
 
         log.info(
             "engine.processed",

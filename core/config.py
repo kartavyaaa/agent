@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     worker_queue_name: str = "arq:queue"
     reminder_poll_interval_seconds: int = 60
 
+    # Memory / history
+    conversation_history_turns: int = 10
+
     # App
     environment: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"

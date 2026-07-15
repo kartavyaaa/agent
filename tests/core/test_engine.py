@@ -49,8 +49,8 @@ def _tool_call_response(tool_name: str, args: dict) -> LLMResponse:  # type: ign
 def _make_engine(
     llm_response: LLMResponse | None = None,
     registry_output: dict | None = None,  # type: ignore[type-arg]
-) -> tuple[CoreEngine, MagicMock, MagicMock, MagicMock]:
-    """Return (engine, mock_db, mock_llm, mock_registry)."""
+) -> tuple[CoreEngine, MagicMock, MagicMock, MagicMock, MagicMock]:
+    """Return (engine, mock_db, mock_llm, mock_registry, mock_memory)."""
     mock_db = MagicMock()
     mock_db.commit = AsyncMock()
     mock_db.rollback = AsyncMock()
@@ -83,12 +83,14 @@ def _make_engine(
 
     mock_memory = MagicMock()
     mock_memory.write = AsyncMock(return_value=MagicMock())
+    mock_memory.get_recent = AsyncMock(return_value=[])
 
     mock_settings = MagicMock()
     mock_settings.openai_default_model = "gpt-5.5"
     mock_settings.planner_max_iterations = 8
     mock_settings.planner_default_temperature = None
     mock_settings.default_timezone = "Asia/Kolkata"
+    mock_settings.conversation_history_turns = 10
 
     engine = CoreEngine(
         llm=mock_llm,
@@ -97,7 +99,7 @@ def _make_engine(
         session_factory=mock_factory,
         settings=mock_settings,
     )
-    return engine, mock_db, mock_llm, mock_registry
+    return engine, mock_db, mock_llm, mock_registry, mock_memory
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ def _make_engine(
 
 @pytest.mark.asyncio
 async def test_handle_request_direct_message() -> None:
-    engine, mock_db, mock_llm, _ = _make_engine(
+    engine, mock_db, mock_llm, _, _ = _make_engine(
         llm_response=_message_response("Sure, the capital of France is Paris.")
     )
 
@@ -123,7 +125,7 @@ async def test_handle_request_direct_message() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_request_commits_on_success() -> None:
-    engine, mock_db, _, _ = _make_engine()
+    engine, mock_db, _, _, _ = _make_engine()
 
     await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
 
@@ -138,7 +140,7 @@ async def test_handle_request_commits_on_success() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_request_tool_call() -> None:
-    engine, mock_db, _, mock_registry = _make_engine(
+    engine, mock_db, _, mock_registry, _ = _make_engine(
         llm_response=_tool_call_response(
             "create_reminder",
             {"message": "call Bob", "remind_at": "2026-07-08T09:00:00Z"},
@@ -163,7 +165,7 @@ async def test_handle_request_tool_call() -> None:
 @pytest.mark.asyncio
 async def test_handle_request_registry_receives_user_id() -> None:
     uid = uuid.uuid4()
-    engine, _, _, mock_registry = _make_engine(
+    engine, _, _, mock_registry, _ = _make_engine(
         llm_response=_tool_call_response(
             "create_reminder", {"message": "x", "remind_at": "2026-07-08T09:00:00Z"}
         ),
@@ -183,7 +185,7 @@ async def test_handle_request_registry_receives_user_id() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_request_rolls_back_on_error() -> None:
-    engine, mock_db, mock_llm, _ = _make_engine()
+    engine, mock_db, mock_llm, _, _ = _make_engine()
     mock_llm.complete = AsyncMock(side_effect=RuntimeError("boom"))
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -195,7 +197,7 @@ async def test_handle_request_rolls_back_on_error() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_request_no_commit_on_error() -> None:
-    engine, mock_db, _, mock_registry = _make_engine(
+    engine, mock_db, _, mock_registry, _ = _make_engine(
         llm_response=_tool_call_response("create_reminder", {}),
     )
     mock_registry.execute = AsyncMock(side_effect=ValueError("bad args"))
@@ -214,7 +216,7 @@ async def test_handle_request_no_commit_on_error() -> None:
 
 @pytest.mark.asyncio
 async def test_system_prompt_contains_timezone_info() -> None:
-    engine, _, mock_llm, _ = _make_engine()
+    engine, _, mock_llm, _, _ = _make_engine()
 
     await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
 
@@ -236,11 +238,68 @@ async def test_system_prompt_contains_timezone_info() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_written_after_response() -> None:
-    engine, _, _, _ = _make_engine(llm_response=_message_response("hi"))
-    # engine._memory is already a MagicMock with write=AsyncMock from _make_engine
-    mock_memory: MagicMock = engine._memory  # type: ignore[assignment]
+    engine, _, _, _, mock_memory = _make_engine(llm_response=_message_response("hi"))
 
     result = await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="say hi"))
 
     mock_memory.write.assert_called_once()
     assert result.memories_written == 1
+
+
+# ---------------------------------------------------------------------------
+# Conversation history injection
+# ---------------------------------------------------------------------------
+
+
+def _fake_mem(content: str) -> MagicMock:
+    m = MagicMock()
+    m.content = content
+    return m
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_contains_history_block() -> None:
+    engine, _, mock_llm, _, mock_memory = _make_engine()
+    mock_memory.get_recent = AsyncMock(
+        return_value=[
+            _fake_mem("User: hi\nAssistant: hello"),
+            _fake_mem("User: my name is Kartavya\nAssistant: Nice to meet you, Kartavya!"),
+        ]
+    )
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="what's my name?"))
+
+    call_args = mock_llm.complete.call_args
+    kwargs = call_args[1] if call_args[1] else {}
+    messages: list[LLMMessage] = kwargs["messages"] if kwargs else call_args[0][0]
+    system_content: str = next(m for m in messages if m.role == "system").content  # type: ignore[assignment]
+    assert "Recent conversation history (oldest to newest):" in system_content
+    assert "User: hi\nAssistant: hello" in system_content
+    assert "User: my name is Kartavya\nAssistant: Nice to meet you, Kartavya!" in system_content
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_no_history_block_when_empty() -> None:
+    engine, _, mock_llm, _, _ = _make_engine()
+    # get_recent returns [] by default in _make_engine
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
+
+    call_args = mock_llm.complete.call_args
+    kwargs = call_args[1] if call_args[1] else {}
+    messages: list[LLMMessage] = kwargs["messages"] if kwargs else call_args[0][0]
+    system_content: str = next(m for m in messages if m.role == "system").content  # type: ignore[assignment]
+    assert "Recent conversation history" not in system_content
+
+
+@pytest.mark.asyncio
+async def test_get_recent_called_with_correct_user_and_limit() -> None:
+    uid = uuid.uuid4()
+    engine, _, _, _, mock_memory = _make_engine()
+
+    await engine.handle_request(CoreRequest(user_id=uid, content="hello"))
+
+    mock_memory.get_recent.assert_called_once()
+    call_kwargs = mock_memory.get_recent.call_args.kwargs
+    assert call_kwargs["user_id"] == uid
+    assert call_kwargs["limit"] == 10

@@ -166,3 +166,67 @@ async def test_semantic_search_updates_last_accessed() -> None:
     await manager.semantic_search(db, user_id=uuid.uuid4(), query="test")
 
     assert row.last_accessed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# get_recent()
+# ---------------------------------------------------------------------------
+
+
+def _mem(content: str) -> SimpleNamespace:
+    return SimpleNamespace(content=content)
+
+
+@pytest.mark.asyncio
+async def test_get_recent_returns_oldest_first() -> None:
+    manager = _make_manager()
+    db = MagicMock()
+    # DB returns DESC (newest first): turn3, turn2, turn1
+    rows_desc = [_mem("turn3"), _mem("turn2"), _mem("turn1")]
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = rows_desc
+    db.execute = AsyncMock(return_value=mock_result)
+
+    result = await manager.get_recent(db, user_id=uuid.uuid4(), limit=3)
+
+    assert [r.content for r in result] == ["turn1", "turn2", "turn3"]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_empty_when_none() -> None:
+    manager = _make_manager()
+    db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+
+    result = await manager.get_recent(db, user_id=uuid.uuid4(), limit=10)
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_recent_does_not_update_last_accessed() -> None:
+    manager = _make_manager()
+    db = MagicMock()
+    row = SimpleNamespace(content="x", last_accessed_at=None)
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [row]
+    db.execute = AsyncMock(return_value=mock_result)
+
+    await manager.get_recent(db, user_id=uuid.uuid4(), limit=5)
+
+    assert row.last_accessed_at is None
+
+
+@pytest.mark.asyncio
+async def test_get_recent_does_not_embed() -> None:
+    manager = _make_manager()
+    db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=mock_result)
+
+    await manager.get_recent(db, user_id=uuid.uuid4(), limit=5)
+
+    _mock_llm(manager).embed.assert_not_called()
