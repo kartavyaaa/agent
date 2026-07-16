@@ -377,3 +377,98 @@ async def test_recall_dedupes_recent_history() -> None:
 
     # Should NOT inject a separate recall block — already in recent history
     assert "Relevant past context" not in _get_system_prompt(mock_llm)
+
+
+# ---------------------------------------------------------------------------
+# Image / vision path
+# ---------------------------------------------------------------------------
+
+_FAKE_B64 = "aGVsbG8="  # base64("hello") — stands in for real image bytes
+_FAKE_MIME = "image/jpeg"
+
+
+def _get_user_msg(mock_llm: MagicMock) -> LLMMessage:
+    call_args = mock_llm.complete.call_args
+    kwargs = call_args[1] if call_args[1] else {}
+    messages: list[LLMMessage] = kwargs["messages"] if kwargs else call_args[0][0]
+    return next(m for m in messages if m.role == "user")
+
+
+@pytest.mark.asyncio
+async def test_image_request_builds_content_part_list() -> None:
+    """When image_base64 is set, the user LLMMessage must carry a content-part list."""
+    engine, _, mock_llm, _, _ = _make_engine()
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content="How's the lighting?",
+            image_base64=_FAKE_B64,
+            image_mime=_FAKE_MIME,
+        )
+    )
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, list), "image request must produce a list content"
+    types = [part["type"] for part in user_msg.content]
+    assert "input_image" in types
+    assert "input_text" in types
+
+    image_part = next(p for p in user_msg.content if p["type"] == "input_image")
+    assert image_part["image_url"] == f"data:{_FAKE_MIME};base64,{_FAKE_B64}"
+
+    text_part = next(p for p in user_msg.content if p["type"] == "input_text")
+    assert text_part["text"] == "How's the lighting?"
+
+
+@pytest.mark.asyncio
+async def test_image_request_semantic_search_receives_string() -> None:
+    """Semantic search must receive the string caption, never image bytes."""
+    engine, _, _, _, mock_memory = _make_engine()
+    caption = "Nice composition here"
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content=caption,
+            image_base64=_FAKE_B64,
+            image_mime=_FAKE_MIME,
+        )
+    )
+
+    call_kwargs = mock_memory.semantic_search.call_args.kwargs
+    assert call_kwargs["query"] == caption
+    assert _FAKE_B64 not in call_kwargs["query"]
+
+
+@pytest.mark.asyncio
+async def test_image_request_memory_write_receives_string() -> None:
+    """Episodic memory write must use the string caption, never image bytes."""
+    engine, _, _, _, mock_memory = _make_engine(llm_response=_message_response("Great shot!"))
+    caption = "Nice composition here"
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content=caption,
+            image_base64=_FAKE_B64,
+            image_mime=_FAKE_MIME,
+        )
+    )
+
+    write_kwargs = mock_memory.write.call_args.kwargs
+    written_content: str = write_kwargs["content"]
+    assert written_content.startswith(f"User: {caption}")
+    assert _FAKE_B64 not in written_content
+
+
+@pytest.mark.asyncio
+async def test_text_only_request_unchanged() -> None:
+    """Text-only requests must still produce a plain string user message (no list)."""
+    engine, _, mock_llm, _, _ = _make_engine()
+
+    await engine.handle_request(CoreRequest(user_id=uuid.uuid4(), content="hello"))
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, str)
+    assert user_msg.content == "hello"

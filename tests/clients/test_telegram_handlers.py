@@ -6,6 +6,8 @@ get_or_create_user_by_telegram_id is patched at its imported name in handlers.
 
 from __future__ import annotations
 
+import base64
+import io
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,7 +18,7 @@ pytest.importorskip(
     reason="telegramify-markdown not installed (PC-gate item; run pip install -e '.[dev]' on PC)",
 )
 
-from clients.telegram.handlers import handle_message  # noqa: E402
+from clients.telegram.handlers import handle_message, handle_photo  # noqa: E402
 from core.schemas import CoreResponse  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -254,3 +256,101 @@ async def test_whitespace_response_sends_fallback() -> None:
 
     msg.answer.assert_awaited_once()
     assert msg.answer.call_args.args[0] == "(No response.)"
+
+
+# ---------------------------------------------------------------------------
+# Photo handler tests
+# ---------------------------------------------------------------------------
+
+_FAKE_IMAGE_BYTES = b"FAKE_IMAGE_BYTES"
+_FAKE_B64 = base64.b64encode(_FAKE_IMAGE_BYTES).decode()
+
+
+def _make_photo_message(
+    caption: str | None = "Nice shot",
+    from_user_id: int | None = 12345,
+) -> MagicMock:
+    msg = MagicMock()
+    msg.caption = caption
+    msg.answer = AsyncMock()
+    if from_user_id is None:
+        msg.from_user = None
+    else:
+        msg.from_user = MagicMock()
+        msg.from_user.id = from_user_id
+    # Telegram photo list — highest res is last
+    photo_size = MagicMock()
+    photo_size.file_id = "test_file_id"
+    msg.photo = [photo_size]
+    # bot accessible via message.bot (aiogram injects from update context)
+    msg.bot = MagicMock()
+    msg.bot.get_file = AsyncMock(return_value=MagicMock(file_path="photos/test.jpg"))
+    msg.bot.download_file = AsyncMock(return_value=io.BytesIO(_FAKE_IMAGE_BYTES))
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_builds_correct_core_request() -> None:
+    uid = uuid.uuid4()
+    msg = _make_photo_message(caption="Nice shot")
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({12345}))
+
+    engine.handle_request.assert_awaited_once()
+    req = engine.handle_request.call_args[0][0]
+    assert req.user_id == uid
+    assert req.content == "Nice shot"
+    assert req.image_base64 == _FAKE_B64
+    assert req.image_mime == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_no_caption_uses_default_prompt() -> None:
+    uid = uuid.uuid4()
+    msg = _make_photo_message(caption=None)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({12345}))
+
+    req = engine.handle_request.call_args[0][0]
+    assert req.content == "Please critique this photo."
+    assert req.image_base64 == _FAKE_B64
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_allowlist_blocks_non_allowed() -> None:
+    msg = _make_photo_message(from_user_id=9999)
+    engine = _make_engine()
+    factory = _make_session_factory(uuid.uuid4())
+
+    await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({1}))
+
+    engine.handle_request.assert_not_awaited()
+    msg.answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_photo_allowlist_passes_allowed_sender() -> None:
+    uid = uuid.uuid4()
+    msg = _make_photo_message(from_user_id=42)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({42}))
+
+    engine.handle_request.assert_awaited_once()

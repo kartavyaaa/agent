@@ -11,6 +11,8 @@ class CoreRequest(BaseModel):
     content: str
     session_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     metadata: dict[str, Any] = {}
+    image_base64: str | None = None  # base64-encoded image bytes
+    image_mime: str | None = None  # e.g. "image/jpeg"
 
 
 class CoreResponse(BaseModel):

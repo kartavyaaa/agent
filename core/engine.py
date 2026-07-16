@@ -24,6 +24,8 @@ _SYSTEM_PROMPT = (
     "When the user mentions a time, interpret it in their timezone ({tz}). "
     "When calling create_reminder, always emit remind_at as an absolute UTC ISO timestamp "
     "(e.g. 2026-07-14T03:30:00Z). "
+    "When the user sends a photo, provide a thoughtful critique covering composition, "
+    "lighting, subject, and suggestions for improvement. "
     "When all necessary actions are complete, reply directly to the user."
 )
 
@@ -95,7 +97,7 @@ class CoreEngine:
             scored = await self._memory.semantic_search(
                 db,
                 user_id=request.user_id,
-                query=request.content,
+                query=request.content,  # always a plain string (caption or default prompt)
                 top_k=self._settings.semantic_recall_top_k,
                 memory_types=["episodic"],
             )
@@ -120,7 +122,20 @@ class CoreEngine:
             + recall_block
             + history_block,
         )
-        user_msg = LLMMessage(role="user", content=request.content)
+        if request.image_base64:
+            user_content: str | list[dict] = [  # type: ignore[type-arg]
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{request.image_mime};base64,{request.image_base64}",
+                },
+                {
+                    "type": "input_text",
+                    "text": request.content,
+                },
+            ]
+        else:
+            user_content = request.content
+        user_msg = LLMMessage(role="user", content=user_content)
 
         planner = ReActPlanner(
             llm=self._llm,
@@ -141,7 +156,7 @@ class CoreEngine:
         await self._memory.write(
             db,
             user_id=request.user_id,
-            content=f"User: {request.content}\nAssistant: {plan_result.content}",
+            content=f"User: {request.content}\nAssistant: {plan_result.content}",  # content is always str
             memory_type="episodic",
             metadata={
                 "session_id": str(request.session_id),

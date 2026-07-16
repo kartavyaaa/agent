@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-07-16 — Slice 1: Vision input + photo critique
+
+**What was built:**
+
+- `core/schemas.py`: Added `image_base64: str | None` and `image_mime: str | None` to `CoreRequest`.
+  `content: str` stays unchanged — carries the caption or default critique prompt.
+- `core/engine.py`: `_process` now builds a content-part list (`[{type:input_image,...}, {type:input_text,...}]`)
+  for the user `LLMMessage` when `image_base64` is set; falls back to plain string for text-only requests.
+  Semantic search and episodic memory write always receive `request.content` (a plain string — caption or
+  default prompt), never image bytes. Added one system-prompt clause instructing the model to critique
+  composition/lighting/subject/suggestions when a photo is received.
+- `clients/telegram/handlers.py`: Added `@router.message(F.photo)` handler (`handle_photo`). Downloads
+  the highest-res photo via `message.bot.get_file` / `message.bot.download_file`, base64-encodes it,
+  uses `message.caption` or `"Please critique this photo."` as `content`. Enforces the same allowlist
+  guard as the text handler. Error handling mirrors `handle_message` exactly.
+- `tests/core/test_engine.py`: 4 new tests — content-part list shape, semantic search receives string,
+  memory write receives string, text-only path unchanged.
+- `tests/clients/test_telegram_handlers.py`: 4 new tests — correct `CoreRequest` built with caption,
+  default prompt when no caption, allowlist block, allowlist pass.
+
+**Key design decisions:**
+
+- Engine-level (not plugin): the LLM cannot supply raw image bytes as a tool argument; injecting the
+  image directly into the user `LLMMessage` before the planner is the only clean path.
+- `image_base64: str` (not `bytes`): future-proofs the REST path (`ChatRequest` adapter in the API
+  route constructs `CoreRequest` in-process, so bytes would work today, but str is JSON-safe and
+  consistent).
+- `message.photo` and `message.bot` are guaranteed non-None when `F.photo` fires, but mypy doesn't
+  know that — added `assert` statements to narrow types rather than `# type: ignore` (asserts are
+  defensive checks, not suppressions).
+- Provider layer needed zero changes: `_to_items()` already passes `list[dict]` user content
+  through unchanged on the plain-message branch.
+- Telegram always delivers photos as JPEG regardless of original upload format; `image/jpeg` is always correct.
+
+**What failed during implementation:**
+
+- mypy caught 5 errors: `message.photo` typed as `list[PhotoSize] | None` (not indexable without
+  guard), `message.bot` typed as `Bot | None` (get_file/download_file not callable), `file.file_path`
+  typed as `str | None` (download_file expects `str | Path`), `buf` typed as `BinaryIO | None`.
+  Fixed with `assert` narrowing guards.
+
+**Deferred / PC gate:**
+
+- No migration (CoreRequest is not a DB model).
+- PC: `pytest -v` full suite + `docker compose up --build` + `/health` 200.
+- Live: send real photo (no caption) → genuine critique; send with caption → answers that question.
+  Watch logs to confirm image carried through and model called.
+
+---
+
 ## 2026-07-15 — Slice: list_reminders + cancel_reminder plugins
 
 **What was built:**
