@@ -24,49 +24,6 @@ router = Router()
 _FALLBACK = "(No response.)"
 
 
-@router.message()
-async def handle_message(
-    message: Message,
-    engine: Any,
-    session_factory: Any,
-    allowed_user_ids: frozenset[int],
-) -> None:
-    if not message.text or not message.from_user:
-        return
-
-    if message.from_user.id not in allowed_user_ids:
-        log.info("telegram.message.ignored", telegram_user_id=message.from_user.id)
-        return
-
-    async with session_factory() as db:
-        user_id = await get_or_create_user_by_telegram_id(db, message.from_user.id)
-        await db.commit()
-
-    request = CoreRequest(user_id=user_id, content=message.text)
-    try:
-        response: CoreResponse = await engine.handle_request(request)
-        from clients.telegram.formatters import (  # lazy: import only on success path; keeps error paths importable without telegramify_markdown
-            format_response,
-        )
-
-        chunks = format_response(response.content)
-        if not chunks:
-            await message.answer(_FALLBACK)
-        else:
-            for chunk_text, chunk_entities in chunks:
-                await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
-    except PlatformError as exc:
-        log.warning(
-            "telegram.handle_message.platform_error",
-            exc_type=type(exc).__name__,
-            error=str(exc),
-        )
-        await message.answer(user_message(exc))
-    except Exception:
-        log.exception("telegram.handle_message.unexpected_error")
-        await message.answer(_GENERIC_FALLBACK)
-
-
 @router.message(F.photo)
 async def handle_photo(
     message: Message,
@@ -80,6 +37,8 @@ async def handle_photo(
     if message.from_user.id not in allowed_user_ids:
         log.info("telegram.photo.ignored", telegram_user_id=message.from_user.id)
         return
+
+    log.info("telegram.photo.received", telegram_user_id=message.from_user.id)
 
     async with session_factory() as db:
         user_id = await get_or_create_user_by_telegram_id(db, message.from_user.id)
@@ -122,4 +81,47 @@ async def handle_photo(
         await message.answer(user_message(exc))
     except Exception:
         log.exception("telegram.handle_photo.unexpected_error")
+        await message.answer(_GENERIC_FALLBACK)
+
+
+@router.message(F.text)
+async def handle_message(
+    message: Message,
+    engine: Any,
+    session_factory: Any,
+    allowed_user_ids: frozenset[int],
+) -> None:
+    if not message.text or not message.from_user:
+        return
+
+    if message.from_user.id not in allowed_user_ids:
+        log.info("telegram.message.ignored", telegram_user_id=message.from_user.id)
+        return
+
+    async with session_factory() as db:
+        user_id = await get_or_create_user_by_telegram_id(db, message.from_user.id)
+        await db.commit()
+
+    request = CoreRequest(user_id=user_id, content=message.text)
+    try:
+        response: CoreResponse = await engine.handle_request(request)
+        from clients.telegram.formatters import (  # lazy: import only on success path; keeps error paths importable without telegramify_markdown
+            format_response,
+        )
+
+        chunks = format_response(response.content)
+        if not chunks:
+            await message.answer(_FALLBACK)
+        else:
+            for chunk_text, chunk_entities in chunks:
+                await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
+    except PlatformError as exc:
+        log.warning(
+            "telegram.handle_message.platform_error",
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
+        await message.answer(user_message(exc))
+    except Exception:
+        log.exception("telegram.handle_message.unexpected_error")
         await message.answer(_GENERIC_FALLBACK)
