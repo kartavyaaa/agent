@@ -2,6 +2,61 @@
 
 ---
 
+## 2026-07-15 — Slice: Task management plugins (create_task / list_tasks / complete_task)
+
+**What was built:**
+
+- `plugins/tasks/schemas.py`: Pydantic input/output/config models for all three plugins. Optional
+  fields typed as `X | None` (not defaulted) so strict schema normalization keeps them in
+  `required` while the LLM can pass `null`.
+- `plugins/tasks/create.py` (`CreateTaskPlugin`): Creates a `Task` row; reuses `format_local`
+  from `core/timeutil.py` for due-date display in the confirmation. Naive datetimes treated as UTC
+  (same pattern as `RemindersPlugin`). `priority=None` falls back to 1 (DB default).
+- `plugins/tasks/list.py` (`ListTasksPlugin`): Queries open tasks (`pending` + `in_progress`) by
+  default; accepts explicit `status_filter` for other statuses. Ordered by priority desc / due_at
+  asc / created_at asc; capped at 50 rows. Returns `task_id` as a string in every summary so the
+  LLM can hand it to `complete_task`.
+- `plugins/tasks/complete.py` (`CompleteTaskPlugin`): Marks a task `completed`. Scopes the lookup
+  by BOTH `task.id` AND `user_id` — task_id alone never authorizes. Invalid UUID and not-found
+  return a friendly `status="not_found"` result (not an exception), so the LLM can relay the
+  message gracefully.
+- `clients/wiring.py`: Registered all three plugins unconditionally (no external API dependency).
+- `tests/plugins/test_tasks.py`: 25 unit tests covering schema, execute(), and health_check() for
+  all three plugins with mocked DB.
+
+**What failed / was fixed:**
+
+- `_normalize_for_openai_strict` makes every `properties` key `required`. Optional fields typed
+  with a default (e.g. `priority: int = 1`) would be ABSENT from `properties` after Pydantic's
+  JSON schema generation (defaulted fields are omitted). Solution: type them as `X | None` with no
+  default — they appear in `properties`, the LLM passes `null`, and the plugin applies its own
+  default. Confirmed against `ReminderInput` (which uses the same pattern).
+- `Task.status` is `Mapped[str]` (no Python Enum class) — bare string comparisons and assignments
+  (`task.status = "completed"`, `.where(Task.status == "pending")`) are correct. This would only
+  surface on real Postgres if it were wrong, not in mocked unit tests.
+- `test_list_tasks_default_filter_queries_open_statuses`: initial approach compiled the SQLAlchemy
+  statement with `literal_binds=False` and asserted "pending" appeared in the string. SQLAlchemy
+  uses `__[POSTCOMPILE_...]` for `IN` lists at that setting, so the strings don't appear. Fixed:
+  changed to a simple constant-value assertion on `_OPEN_STATUSES`. Authoritative verification
+  of the filter remains the live bot test.
+- mypy: `list` without type arg in `_make_db_with_query`. Fixed to `list[MagicMock]`.
+
+**Key design decisions:**
+
+- One plugin per operation (not one plugin with an `action` field) — matches existing convention.
+- `list_tasks` default is open tasks only (`pending` + `in_progress`). "What's on my list"
+  means actionable work; completed/cancelled tasks require an explicit `status_filter`.
+- The multi-step `list → match → complete` flow relies entirely on the ReAct planner's existing
+  multi-turn tool-call support. No new planner changes needed. The critical requirement is that
+  `list_tasks` output always includes `task_id` — confirmed in output schema and tests.
+
+**Deferred / PC gate:**
+- No migration (schema existed from slice 0001). Schema-equivalence test must pass unchanged on PC.
+- Live bot test is required to verify: (1) create, (2) list shows it, (3) "complete the X task"
+  triggers list→match→complete multi-step, (4) list no longer shows it as open.
+
+---
+
 ## 2026-07-15 — Slice: Markdown rendering via entity path (telegramify-markdown)
 
 **What was built:**

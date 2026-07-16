@@ -23,6 +23,9 @@ from integrations.local_fs import LocalFsClient
 from integrations.serper import SerperClient
 from plugins.file_reader.plugin import FileReaderPlugin
 from plugins.reminders.plugin import RemindersPlugin
+from plugins.tasks.complete import CompleteTaskPlugin
+from plugins.tasks.create import CreateTaskPlugin
+from plugins.tasks.list import ListTasksPlugin
 from plugins.web_search.plugin import WebSearchPlugin
 
 
@@ -55,6 +58,9 @@ async def build_engine(
     memory = MemoryManager(llm=llm, settings=s)
     registry = ToolRegistry()
     registry.register(RemindersPlugin(tz_name=s.default_timezone))
+    registry.register(CreateTaskPlugin(tz_name=s.default_timezone))
+    registry.register(ListTasksPlugin())
+    registry.register(CompleteTaskPlugin())
 
     serper_client: SerperClient | None = None
     if s.serper_api_key is not None:
