@@ -2,6 +2,41 @@
 
 ---
 
+## 2026-07-15 — Slice: list_reminders + cancel_reminder plugins
+
+**What was built:**
+
+- `plugins/reminders/schemas.py`: Added `ReminderSummary`, `ListRemindersInput` (zero fields),
+  `ListRemindersOutput`, `CancelReminderInput`, `CancelReminderOutput`, and matching config classes.
+- `plugins/reminders/list.py` (`ListRemindersPlugin`): Queries `WHERE user_id=injected AND
+  sent_at IS NULL ORDER BY remind_at ASC LIMIT 50`. Returns `reminder_id` (str UUID), `message`,
+  `remind_at_local` (via `format_local`), and `remind_at_utc`. Read-only; no flush.
+- `plugins/reminders/cancel.py` (`CancelReminderPlugin`): SELECT scoped by id AND user_id AND
+  `sent_at IS NULL`; if found, `db.delete(reminder)` + `db.flush()`; if not found (wrong user,
+  already sent, or bad UUID), returns friendly `status="not_found"`. Engine owns the commit.
+- `clients/wiring.py`: Registered `ListRemindersPlugin` and `CancelReminderPlugin` unconditionally.
+- `tests/plugins/test_list_cancel_reminders.py`: 13 unit tests with mocked DB.
+
+**Key design decisions:**
+
+- `ListRemindersInput` has zero LLM-supplied fields — the tool takes no arguments. Under strict
+  schema normalization, an empty `properties` dict produces `required=[]`, which is valid for
+  OpenAI strict mode.
+- Cancel = hard DELETE (not a status update) since `Reminder` has no status enum. The
+  `sent_at IS NULL` filter on the SELECT is the race guard: the worker uses a separate session
+  with `FOR UPDATE SKIP LOCKED`, so our SELECT either catches a still-pending row (cancellable)
+  or misses it (worker already fired it → not found). No window exists where both succeed.
+- `db.delete` is `AsyncMock` in tests (SQLAlchemy's `session.delete` is technically synchronous,
+  but mocking it as `AsyncMock` is harmless in unit tests — the real behavior is confirmed by the
+  PC integration gate).
+
+**Deferred / PC gate:**
+- No migration. Schema-equivalence test must pass unchanged on PC.
+- Live bot test: create two reminders, "what reminders do I have?" → listed; "cancel the X
+  reminder" → planner does list→cancel; wait for fire time: cancelled one must NOT fire.
+
+---
+
 ## 2026-07-15 — Slice: Task management plugins (create_task / list_tasks / complete_task)
 
 **What was built:**

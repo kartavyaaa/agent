@@ -22,6 +22,8 @@ from core.tools.registry import ToolRegistry
 from integrations.local_fs import LocalFsClient
 from integrations.serper import SerperClient
 from plugins.file_reader.plugin import FileReaderPlugin
+from plugins.reminders.cancel import CancelReminderPlugin
+from plugins.reminders.list import ListRemindersPlugin
 from plugins.reminders.plugin import RemindersPlugin
 from plugins.tasks.complete import CompleteTaskPlugin
 from plugins.tasks.create import CreateTaskPlugin
@@ -58,6 +60,8 @@ async def build_engine(
     memory = MemoryManager(llm=llm, settings=s)
     registry = ToolRegistry()
     registry.register(RemindersPlugin(tz_name=s.default_timezone))
+    registry.register(ListRemindersPlugin(tz_name=s.default_timezone))
+    registry.register(CancelReminderPlugin())
     registry.register(CreateTaskPlugin(tz_name=s.default_timezone))
     registry.register(ListTasksPlugin())
     registry.register(CompleteTaskPlugin())

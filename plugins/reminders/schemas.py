@@ -23,3 +23,39 @@ class ReminderOutput(BaseModel):
 
 class ReminderConfig(BaseModel):
     pass
+
+
+class ReminderSummary(BaseModel):
+    reminder_id: str  # UUID as str — LLM passes this back to cancel_reminder
+    message: str
+    remind_at_local: str  # human-readable via format_local
+    remind_at_utc: str  # ISO string for precision
+
+
+class ListRemindersInput(BaseModel):
+    pass  # no LLM-supplied fields; pending-only is the only behavior
+
+
+class ListRemindersOutput(BaseModel):
+    reminders: list[ReminderSummary]
+    count: int
+
+
+class ListRemindersConfig(BaseModel):
+    pass
+
+
+class CancelReminderInput(BaseModel):
+    # UUID string the LLM obtained from a prior list_reminders call.
+    reminder_id: str
+
+
+class CancelReminderOutput(BaseModel):
+    reminder_id: str
+    message: str  # reminder text, for confirmation
+    status: str  # "cancelled" | "not_found"
+    detail: str  # human-readable result
+
+
+class CancelReminderConfig(BaseModel):
+    pass
