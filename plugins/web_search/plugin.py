@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +41,7 @@ class WebSearchPlugin(PluginBase):
         *,
         user_id: uuid.UUID,  # noqa: ARG002
         db: AsyncSession,  # noqa: ARG002
+        **kwargs: Any,
     ) -> WebSearchOutput:
         data = cast(WebSearchInput, input)
         raw = await self._client.search(data.query, num_results=data.max_results)

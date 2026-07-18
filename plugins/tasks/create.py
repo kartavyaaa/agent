@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,7 @@ class CreateTaskPlugin(PluginBase):
         *,
         user_id: uuid.UUID,
         db: AsyncSession,
+        **kwargs: Any,
     ) -> CreateTaskOutput:
         assert isinstance(input, CreateTaskInput)
         due_at: datetime | None = None

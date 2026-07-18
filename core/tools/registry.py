@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import uuid
 from typing import Any
 
@@ -9,6 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.exceptions import PluginNotFoundError, PluginValidationError
 from core.llm.base import LLMTool
 from plugins.base import PluginBase
+
+# Keys that the engine injects into action_payload at proposal time (trusted server context).
+# These are never LLM-supplied and must be separated from raw_args before input_schema validation,
+# then forwarded to plugin.execute() only if the plugin's signature declares the parameter.
+_INJECTED_CONTEXT_KEYS: frozenset[str] = frozenset({"image_url"})
 
 
 def _normalize_for_openai_strict(schema: dict[str, Any]) -> None:
@@ -45,6 +51,9 @@ class ToolRegistry:
 
     def register(self, plugin: PluginBase) -> None:
         self._plugins[plugin.name] = plugin
+
+    def get_plugin(self, name: str) -> PluginBase | None:
+        return self._plugins.get(name)
 
     def get_tools_for_llm(self) -> list[LLMTool]:
         tools: list[LLMTool] = []
@@ -87,9 +96,22 @@ class ToolRegistry:
                 "tool": name,
                 "args": raw_args,
             }
+        # Separate engine-injected context (image_url, etc.) from LLM-supplied args.
+        # Injected keys are stored in action_payload by the engine at proposal time —
+        # they must not be validated by input_schema (which only knows LLM-facing fields).
+        injected: dict[str, Any] = {}
+        llm_args: dict[str, Any] = {}
+        for k, v in raw_args.items():
+            (injected if k in _INJECTED_CONTEXT_KEYS else llm_args)[k] = v
+
+        # Filter injected to only params the plugin's execute() actually accepts,
+        # so plugins without image_url in their signature don't receive it.
+        sig = inspect.signature(plugin.execute)
+        accepted_injected = {k: v for k, v in injected.items() if k in sig.parameters}
+
         try:
-            validated = plugin.input_schema(**raw_args)
+            validated = plugin.input_schema(**llm_args)
         except ValidationError as exc:
             raise PluginValidationError(str(exc)) from exc
-        result = await plugin.execute(validated, user_id=user_id, db=db)
+        result = await plugin.execute(validated, user_id=user_id, db=db, **accepted_injected)
         return result.model_dump()

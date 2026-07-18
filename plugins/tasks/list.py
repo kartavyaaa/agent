@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -38,6 +38,7 @@ class ListTasksPlugin(PluginBase):
         *,
         user_id: uuid.UUID,
         db: AsyncSession,
+        **kwargs: Any,
     ) -> ListTasksOutput:
         assert isinstance(input, ListTasksInput)
         stmt = select(Task).where(Task.user_id == user_id)

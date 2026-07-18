@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid as _uuid_mod
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -37,6 +37,7 @@ class CancelReminderPlugin(PluginBase):
         *,
         user_id: _uuid_mod.UUID,
         db: AsyncSession,
+        **kwargs: Any,
     ) -> CancelReminderOutput:
         assert isinstance(input, CancelReminderInput)
         try:

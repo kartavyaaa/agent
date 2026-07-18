@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,7 @@ class ApprovalTestPlugin(PluginBase):
         *,
         user_id: uuid.UUID,
         db: AsyncSession,
+        **kwargs: Any,
     ) -> ApprovalTestOutput:
         assert isinstance(input, ApprovalTestInput)
         return ApprovalTestOutput(

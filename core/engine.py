@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import select
@@ -12,11 +13,15 @@ from clients.user_helper import get_or_create_user
 from core.config import Settings
 from core.llm.base import LLMConfig, LLMMessage, LLMProvider
 from core.memory.manager import MemoryManager
+from core.planner.base import PendingActionProposal
 from core.planner.react import ReActPlanner
 from core.schemas import CoreRequest, CoreResponse, ProposalPayload
 from core.timeutil import format_local
 from core.tools.registry import ToolRegistry
 from models.pending_action import PendingAction
+
+if TYPE_CHECKING:
+    from integrations.r2 import R2Client
 
 _SYSTEM_PROMPT = (
     "You are a personal AI assistant. "
@@ -48,12 +53,14 @@ class CoreEngine:
         registry: ToolRegistry,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        r2: R2Client | None = None,
     ) -> None:
         self._llm = llm
         self._memory = memory
         self._registry = registry
         self._session_factory = session_factory
         self._settings = settings
+        self._r2 = r2
 
     @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
@@ -158,6 +165,36 @@ class CoreEngine:
 
         if plan_result.pending_action is not None:
             pa = plan_result.pending_action
+            plugin = self._registry.get_plugin(pa.action_type)
+
+            # If the action needs a hosted image, upload now (bytes are available
+            # in request.image_base64). This happens only in the proposal branch,
+            # so ordinary photo critiques never touch R2.
+            if getattr(plugin, "needs_hosted_image", False):
+                if not request.image_base64:
+                    # User requested posting without sending a photo — refuse early
+                    # so no incomplete payload gets stored in pending_actions.
+                    return CoreResponse(content="Please send a photo to post to Instagram.")
+                if self._r2 is None:
+                    # Defensive guard: wiring only registers instagram_post when R2
+                    # is configured, so this branch is normally unreachable.
+                    return CoreResponse(
+                        content="Image hosting is not configured; cannot post to Instagram."
+                    )
+                img_bytes = base64.b64decode(request.image_base64)
+                r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
+                r2_url = await self._r2.upload(
+                    img_bytes,
+                    key=r2_key,
+                    content_type=request.image_mime or "image/jpeg",
+                )
+                pa = PendingActionProposal(
+                    action_type=pa.action_type,
+                    action_payload={**pa.action_payload, "image_url": r2_url},
+                    preview_text=pa.preview_text,
+                )
+                log.info("engine.r2_upload", key=r2_key, action_type=pa.action_type)
+
             # Single-pending enforcement: cancel any existing pending action for
             # this user before inserting the new one (avoids partial-unique-index
             # violation).

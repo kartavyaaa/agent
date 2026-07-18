@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,7 @@ class PluginBase(ABC):
     output_schema: ClassVar[type[BaseModel]]
     config_schema: ClassVar[type[BaseModel]]
     requires_approval: ClassVar[bool] = False
+    needs_hosted_image: ClassVar[bool] = False
 
     def get_info(self) -> PluginInfo:
         return PluginInfo(
@@ -61,6 +62,7 @@ class PluginBase(ABC):
         *,
         user_id: uuid.UUID,
         db: AsyncSession,
+        **kwargs: Any,
     ) -> BaseModel:
         """Run the plugin. Raises PluginError on expected failures."""
         ...

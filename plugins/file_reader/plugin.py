@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +54,7 @@ class FileReaderPlugin(PluginBase):
         *,
         user_id: uuid.UUID,  # noqa: ARG002
         db: AsyncSession,  # noqa: ARG002
+        **kwargs: Any,
     ) -> FileReaderOutput:
         data = cast(FileReaderInput, input)
         result = await self._client.read(data.path)

@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     serper_api_key: SecretStr | None = None
     google_credentials_json: str | None = None  # JSON string of service account creds
 
+    # Cloudflare R2 (image hosting for approval-flow uploads)
+    r2_account_id: str | None = None
+    r2_access_key_id: SecretStr | None = None
+    r2_secret_access_key: SecretStr | None = None
+    r2_bucket: str | None = None
+    r2_public_base_url: str | None = None  # public CDN URL, no trailing slash
+
+    # Instagram Graph API
+    instagram_access_token: SecretStr | None = None  # long-lived token (~60 days, must refresh)
+    instagram_user_id: str | None = None  # numeric IG user ID
+
     # File reader
     file_reader_root: Path | None = None
     file_reader_max_bytes: int = 1_048_576  # 1 MB default

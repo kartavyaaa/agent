@@ -87,6 +87,114 @@
   Confirm → "✅ Done." / tap Cancel → "❌ Cancelled." / let expire → "⏰ Action expired." /
   restart bot mid-pending → buttons still work.
 - Next slice: plug in Instagram auto-post as the first real `requires_approval` consumer.
+
+---
+
+## 2026-07-17 — Slice: Instagram Posting Integration
+
+**What was built:**
+
+- `integrations/r2.py`: `R2Client` — async Cloudflare R2 upload via SigV4 presigned PUT URLs.
+  Uses `aws-request-signer` package (zero transitive deps, pure HMAC). `presign_url("PUT", ...,
+  content_hash=UNSIGNED_PAYLOAD)` generates the signed URL; httpx PUT uploads the bytes. Returns
+  `{public_base_url}/{key}`. Tenacity retries on 5xx/timeout; 4xx raises `IntegrationError`.
+- `integrations/instagram.py`: `InstagramClient` — two-step IG Graph API v21.0 (`/media` then
+  `/media_publish`, back-to-back, no readiness wait). Token expiry (error code 190 or "token" in
+  message) raises a clear `IntegrationError("Instagram access token has expired or is invalid —
+  needs refresh in .env")` rather than a generic error. Tenacity retries on 5xx/timeout.
+- `plugins/base.py`: Added `needs_hosted_image: ClassVar[bool] = False` (after
+  `requires_approval`). Also widened abstract `execute()` to `**kwargs: Any` (Liskov — required
+  for mypy strict mode; all existing plugins updated to add `**kwargs: Any` to their signatures).
+- `core/tools/registry.py`: Added `_INJECTED_CONTEXT_KEYS = frozenset({"image_url"})`.
+  `execute()` now splits `raw_args` into `llm_args` (passed to `input_schema`) and `injected`
+  (filtered through `inspect.signature` and forwarded as `**kwargs` to `plugin.execute()`).
+  Added `get_plugin(name)` public method (used by engine, avoids `_plugins` private access).
+- `core/engine.py`: Added `r2: R2Client | None = None` param. In proposal branch: looks up plugin
+  via `registry.get_plugin(action_type)`. If `needs_hosted_image` is True: (a) no image →
+  returns friendly "Please send a photo" early refusal, (b) no R2 configured → returns defensive
+  error (unreachable in practice since plugin only registered with R2), (c) image present →
+  `base64.b64decode` → `r2.upload` → inject `image_url` into `pa.action_payload` before storing
+  the pending row. Ordinary photo critiques never touch R2 (this code runs only in the proposal
+  branch, gated by `needs_hosted_image`).
+- `plugins/instagram_post/`: New plugin — `requires_approval=True`, `needs_hosted_image=True`.
+  `input_schema = InstagramPostInput(caption: str)` — only LLM-facing field. `execute()` receives
+  `image_url` as an injected kwarg (not in schema), calls `ig.publish_photo(image_url, caption)`,
+  returns `InstagramPostOutput(media_id, confirmation)`.
+- `clients/wiring.py`: Constructs `R2Client` (all 5 R2 env vars must be set) then optionally
+  `InstagramClient` + `InstagramPostPlugin` (additionally requires `INSTAGRAM_ACCESS_TOKEN` and
+  `INSTAGRAM_USER_ID`). Both optional with warning logs when absent. Passes `r2=r2_client` to
+  `CoreEngine`.
+- `docker-compose.yml`: Added 7 env vars to `bot` service (R2 × 5, IG × 2). `app` and `worker`
+  services don't need them.
+- `pyproject.toml`: Added `aws-request-signer>=1.0` dependency.
+- Tests: 270 passed, 3 skipped (integration). New: `tests/integrations/test_r2.py`,
+  `tests/integrations/test_instagram.py`, `tests/plugins/test_instagram_post.py`. Extended
+  `test_registry_approval.py` (injected-context extraction) and `test_engine_approval.py`
+  (R2 upload branch, no-image refusal, no-R2 defensive guard).
+
+**Key design decisions:**
+
+- **R2 signing: `aws-request-signer`** (not boto3, not hand-rolled). boto3 would be 25–50 MB for
+  what is pure HMAC arithmetic. `aws-request-signer` is ~5 KB, zero deps, client-agnostic. The
+  key probe finding: `presign_url()` requires `content_hash=UNSIGNED_PAYLOAD` explicitly for PUT
+  requests (raises `ValueError` otherwise) — the research estimated "~5 call-site lines" and that
+  was accurate once the API was probed.
+- **`_INJECTED_CONTEXT_KEYS` + `inspect.signature`**: mirrors the existing `user_id`/`db`
+  injection pattern cleanly. Keys in `action_payload` that are engine-trusted (not LLM-supplied)
+  are stripped before `input_schema` validation and forwarded only to plugins whose `execute()`
+  explicitly declares the parameter. No plugin-side ClassVar needed — registry owns the concept.
+- **`needs_hosted_image` check in proposal branch only**: photo critique continues to work
+  unchanged. The R2 upload is only triggered when the planner proposes an action requiring a
+  hosted image. This was the key architectural separation to protect.
+- **No R2 cleanup after post**: storage is free-tier, deletion adds failure surface (a failed
+  delete shouldn't mask a successful post), images may be useful for debugging.
+- **R2 presigning probe required**: the `UNSIGNED_PAYLOAD` requirement was discovered by actually
+  calling the library (not just the research). The API doc says "content_hash must be specified
+  for PUT request" — this would have been a runtime failure if not caught here. Always probe new
+  signing libraries against the real endpoint on the PC gate.
+
+**What failed during implementation:**
+
+- `aws-request-signer.presign_url()` — initial call without `content_hash` raised `ValueError:
+  content_hash must be specified for PUT request`. Fixed by passing `content_hash=UNSIGNED_PAYLOAD`
+  (imported from the same package).
+- **R2 401 on PC probe**: presigned PUT returned 401 Unauthorized. Root cause: `Content-Type`
+  header was sent in the PUT but NOT included in the signed set, so R2 rejected the request as
+  tampered. Fix: pass `headers={"Content-Type": content_type}` to BOTH `presign_url()` (adds it
+  to `X-Amz-SignedHeaders`) AND the `httpx.put()` call. The library's `headers` param exists
+  exactly for this: any header that will be sent must be signed. Lesson: presigned URL signing
+  is request-exact — unsigned headers sent with the request cause 401, not 403.
+- mypy strict mode (`[override]`): adding `**kwargs: Any` to the abstract `execute()` required
+  ALL existing plugin subclasses to also add `**kwargs: Any` to their signatures. The plan stated
+  "no changes needed to existing plugins" — this was wrong under strict mypy. Mechanical fix
+  across 9 plugins.
+- `engine._process` proposal branch: using `self._registry._plugins.get(pa.action_type)` on a
+  mock registry returned a MagicMock (truthy for `needs_hosted_image`), breaking existing tests.
+  Fixed by adding `registry.get_plugin(name)` public method and configuring mock to return None
+  for existing non-image tests.
+
+**⚠️ OPERATIONAL LANDMINE — TOKEN EXPIRY:**
+The Instagram long-lived access token was issued ~2026-07-17. Long-lived tokens are valid for
+~60 days. **This token expires around 2026-09-15.** After that, all `instagram_post` calls will
+fail with "Instagram access token has expired or is invalid — needs refresh in .env". To refresh:
+```
+GET https://graph.instagram.com/refresh_access_token
+  ?grant_type=ig_refresh_token&access_token=<current_token>
+```
+Update `INSTAGRAM_ACCESS_TOKEN` in prod `.env` on the Oracle VM. This is a manual operation —
+no automated refresh is built (deferred).
+
+**Deferred / PC gate:**
+- `aws-request-signer` must be probed against REAL R2 before declaring the slice done: `pip
+  install aws-request-signer`, throwaway script that presigns + PUTs a test file + confirms it's
+  fetchable via public URL. Mocked tests cannot validate the SigV4 signature is accepted by R2.
+- PC: `pip install -e ".[dev]"` — verifies `aws-request-signer` installs cleanly.
+- PC: `pytest -v` full suite including integration tests (0 skipped). No new migration (reuses
+  `pending_actions` table from previous slice).
+- PC: `docker compose up --build` + `/health` 200.
+- Live end-to-end (the real thing): send photo + "post this to instagram with caption X" →
+  proposal + Confirm/Cancel → tap Confirm → image appears on Instagram. Verify Cancel → no post.
+  Verify double-tap Confirm → posts ONCE. Delete test posts after.
   The `ApprovalTestPlugin` can be removed or kept for testing when Instagram lands.
 
 ---
