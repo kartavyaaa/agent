@@ -74,10 +74,19 @@ class ToolRegistry:
         *,
         user_id: uuid.UUID,
         db: AsyncSession,
+        _approved: bool = False,
     ) -> dict[str, Any]:
         plugin = self._plugins.get(name)
         if plugin is None:
             raise PluginNotFoundError(f"No plugin registered under name '{name}'")
+        # Approval gate: intercept before validation and execution.
+        # _approved=True bypasses this (set by the callback handler on confirm).
+        if getattr(plugin, "requires_approval", False) and not _approved:
+            return {
+                "__approval_required__": True,
+                "tool": name,
+                "args": raw_args,
+            }
         try:
             validated = plugin.input_schema(**raw_args)
         except ValidationError as exc:

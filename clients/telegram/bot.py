@@ -33,11 +33,13 @@ async def run_polling(
     engine: Any,
     session_factory: Any,
     allowed_user_ids: frozenset[int],
+    registry: Any,
 ) -> None:
     """Start long-polling (development / VM mode).
 
-    engine, session_factory, and allowed_user_ids are injected into every
-    handler via Dispatcher's workflow_data kwargs.
+    engine, session_factory, allowed_user_ids, and registry are injected into
+    every handler via Dispatcher's workflow_data kwargs.
+    registry is needed by the callback_query handler to dispatch confirmed actions.
     """
     bot = build_bot()
     dp = build_dispatcher()
@@ -46,4 +48,5 @@ async def run_polling(
         engine=engine,
         session_factory=session_factory,
         allowed_user_ids=allowed_user_ids,
+        registry=registry,
     )

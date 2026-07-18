@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clients.user_helper import get_or_create_user
@@ -11,9 +13,10 @@ from core.config import Settings
 from core.llm.base import LLMConfig, LLMMessage, LLMProvider
 from core.memory.manager import MemoryManager
 from core.planner.react import ReActPlanner
-from core.schemas import CoreRequest, CoreResponse
+from core.schemas import CoreRequest, CoreResponse, ProposalPayload
 from core.timeutil import format_local
 from core.tools.registry import ToolRegistry
+from models.pending_action import PendingAction
 
 _SYSTEM_PROMPT = (
     "You are a personal AI assistant. "
@@ -152,6 +155,49 @@ class CoreEngine:
             user_id=request.user_id,
             db=db,
         )
+
+        if plan_result.pending_action is not None:
+            pa = plan_result.pending_action
+            # Single-pending enforcement: cancel any existing pending action for
+            # this user before inserting the new one (avoids partial-unique-index
+            # violation).
+            existing_result = await db.execute(
+                select(PendingAction).where(
+                    PendingAction.user_id == request.user_id,
+                    PendingAction.status == "pending",
+                )
+            )
+            existing_row = existing_result.scalar_one_or_none()
+            if existing_row is not None:
+                existing_row.status = "cancelled"
+                await db.flush()
+
+            new_id = uuid.uuid4()
+            expires_at = datetime.now(UTC) + timedelta(minutes=self._settings.approval_ttl_minutes)
+            pending_row = PendingAction(
+                id=new_id,
+                user_id=request.user_id,
+                action_type=pa.action_type,
+                action_payload=pa.action_payload,
+                status="pending",
+                preview_text=pa.preview_text,
+                expires_at=expires_at,
+            )
+            db.add(pending_row)
+            await db.flush()
+            log.info(
+                "engine.proposal",
+                action_type=pa.action_type,
+                pending_id=str(new_id),
+            )
+            return CoreResponse(
+                content=pa.preview_text,
+                tool_calls_made=plan_result.tool_calls_made,
+                proposal=ProposalPayload(
+                    pending_action_id=new_id,
+                    preview_text=pa.preview_text,
+                ),
+            )
 
         await self._memory.write(
             db,

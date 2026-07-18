@@ -40,7 +40,7 @@ async def main() -> None:
 
     log.info("telegram_bot.starting", mode="long-polling")
     try:
-        await run_polling(core, session_factory, allowed_user_ids=allowed)
+        await run_polling(core, session_factory, allowed_user_ids=allowed, registry=core._registry)
     finally:
         if serper_client is not None:
             await serper_client.aclose()

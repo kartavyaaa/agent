@@ -42,6 +42,7 @@ class PluginBase(ABC):
     input_schema: ClassVar[type[BaseModel]]
     output_schema: ClassVar[type[BaseModel]]
     config_schema: ClassVar[type[BaseModel]]
+    requires_approval: ClassVar[bool] = False
 
     def get_info(self) -> PluginInfo:
         return PluginInfo(

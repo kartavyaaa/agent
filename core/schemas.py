@@ -15,8 +15,14 @@ class CoreRequest(BaseModel):
     image_mime: str | None = None  # e.g. "image/jpeg"
 
 
+class ProposalPayload(BaseModel):
+    pending_action_id: uuid.UUID
+    preview_text: str
+
+
 class CoreResponse(BaseModel):
     content: str
     memories_written: int = 0
     tool_calls_made: list[str] = []
     error: str | None = None
+    proposal: ProposalPayload | None = None

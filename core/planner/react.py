@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.exceptions import PlannerMaxIterationsError, PlannerStuckLoopError
 from core.llm.base import LLMConfig, LLMMessage, LLMProvider, LLMTool, LLMToolCall
-from core.planner.base import PlannerBase, PlannerResult
+from core.planner.base import PendingActionProposal, PlannerBase, PlannerResult
 from core.tools.registry import ToolRegistry
 
 
@@ -102,7 +102,11 @@ class ReActPlanner(PlannerBase):
                 )
             )
 
-            # Execute every tool in this batch; append results to history
+            # Execute every tool in this batch; append results to history.
+            # If any tool returns an approval sentinel, halt immediately —
+            # the sentinel is NOT appended to history (it must never become an
+            # LLM observation). Remaining batch tools are discarded; the engine
+            # will surface a proposal instead of continuing the plan.
             for tc in llm_resp.tool_calls:
                 tools_called.append(tc.name)
                 log.info("planner.tool_call", tool=tc.name, iteration=iteration)
@@ -112,6 +116,21 @@ class ReActPlanner(PlannerBase):
                     user_id=user_id,
                     db=db,
                 )
+                if out.get("__approval_required__"):
+                    preview = (
+                        f"I'd like to run '{out['tool']}' with these parameters: {out['args']}"
+                    )
+                    log.info("planner.approval_required", tool=out["tool"])
+                    return PlannerResult(
+                        content="",
+                        tool_calls_made=tools_called,
+                        iterations=iteration + 1,
+                        pending_action=PendingActionProposal(
+                            action_type=out["tool"],
+                            action_payload=out["args"],
+                            preview_text=preview,
+                        ),
+                    )
                 result_str = _format_tool_result(out)
                 history.append(
                     LLMMessage(

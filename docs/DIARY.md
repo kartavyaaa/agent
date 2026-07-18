@@ -2,6 +2,95 @@
 
 ---
 
+## 2026-07-17 — Slice: Human-in-the-Loop Approval Flow
+
+**What was built:**
+
+- `models/pending_action.py` + `alembic/versions/0003_pending_actions.py`: New `pending_actions`
+  table with `pending_action_status` enum (`pending`, `executing`, `confirmed`, `cancelled`,
+  `expired`, `failed`). Partial unique index on `(user_id) WHERE status='pending'::...` enforces
+  single-pending-per-user. Enum per CLAUDE.md (postgresql.ENUM create_type=False, explicit CREATE
+  TYPE in migration, cast in partial-index WHERE clause). Registered in `models/__init__.py`.
+- `plugins/base.py`: Added `requires_approval: ClassVar[bool] = False` — safe default, existing
+  plugins untouched.
+- `core/planner/base.py`: Added `PendingActionProposal` dataclass and `pending_action` field to
+  `PlannerResult` (optional, None by default).
+- `core/tools/registry.py`: Added `_approved: bool = False` keyword param to `execute()`. When
+  `plugin.requires_approval and not _approved`, returns sentinel `{"__approval_required__": True,
+  "tool": name, "args": raw_args}` instead of calling `plugin.execute`. `_approved=True` bypasses
+  the gate (used by the callback handler on confirm).
+- `core/planner/react.py`: In the tool-dispatch inner loop, detect the sentinel after
+  `registry.execute()` returns. If found: immediately return `PlannerResult(pending_action=...)` —
+  sentinel is NOT appended to history (that was the key bug to avoid). Remaining batch tools are
+  discarded on sentinel (safest for partial batches).
+- `core/schemas.py`: Added `ProposalPayload` model and `proposal: ProposalPayload | None` field
+  to `CoreResponse`.
+- `core/engine.py`: In `_process`, after `planner.run()`, if `plan_result.pending_action` is set:
+  cancel any existing pending row for the user (superseding), write a new `pending_actions` row
+  (status=pending, expires_at = now + approval_ttl_minutes), return `CoreResponse(proposal=...)`.
+  No episodic memory written on proposal turns.
+- `core/config.py` + `.env.example`: Added `approval_ttl_minutes: int = 60`.
+- `clients/telegram/handlers.py`: Refactored response sending into `_send_response()` helper.
+  Proposal responses render as inline keyboard (`InlineKeyboardMarkup` with `InlineKeyboardButton`).
+  New `@router.callback_query()` handler with full guard sequence: allowlist, data format (`ok:`/
+  `no:` prefix), UUID validity, row existence, user ownership, status (rejects non-pending including
+  `"executing"`), expiry. On `ok`: claim row as `"executing"` and COMMIT before calling
+  `registry.execute(..., _approved=True)` — prevents double-execution on crash. On success:
+  `"confirmed"`. On failure: `"failed"` + friendly message. On `no`: `"cancelled"`.
+  Uses `spec=Message` on mock in tests so `isinstance(callback.message, Message)` works correctly.
+- `clients/telegram/bot.py` + `__main__.py`: Added `registry` kwarg to `run_polling()` and
+  `dp.start_polling(...)` workflow_data. Passed as `core._registry` from `__main__.py` — avoids
+  changing `build_engine`'s return type.
+- `plugins/approval_test/`: New `ApprovalTestPlugin` (`name="dummy_confirm_action"`,
+  `requires_approval=True`) that echoes a message after confirmation. Registered in `wiring.py`.
+  Proves the full pause→propose→confirm→execute cycle without any external side effects.
+- Tests: `test_registry_approval.py`, `test_planner_approval.py`, `test_engine_approval.py`,
+  `test_callback_handler.py`, `test_approval_test_plugin.py`. 234 passed, 6 skipped (integration).
+
+**Key design decisions:**
+
+- **Planner-loop interception** (not pre-planner routing): sentinel returns from registry into the
+  loop body, which detects it and returns immediately. Intelligence stays in the planner; the gate
+  is at the execution boundary. This was the resolved architectural fork.
+- **Claim-before-execute** (`status="executing"` committed before `registry.execute()`): prevents
+  double-execution across crashes or concurrent taps. A post-crash re-tap sees `"executing"` (non-
+  pending) and is rejected. Instagram double-post prevention is built in from day one.
+- **`executing` added to the enum**: required to support the claiming pattern without a separate
+  lock table. The status guard rejects all non-`"pending"` rows including `"executing"`.
+- **`_approved` leading underscore**: signals "internal/trusted" — never appears in LLM-facing
+  schemas, only passed programmatically by the callback handler.
+- **`spec=Message` on mock**: `isinstance(callback.message, Message)` in the handler requires the
+  mock to pass the isinstance check. Patching `Message` in the handler namespace doesn't work
+  because `patch(_PATCH_MSG)` replaces it with a MagicMock which is not a valid isinstance target.
+
+**What failed during implementation:**
+
+- `patch("clients.telegram.handlers.Message")` approach for isinstance: replaced the class with
+  a MagicMock, making `isinstance()` crash with `TypeError: isinstance() arg 2 must be a type`.
+  Fixed by using `MagicMock(spec=Message)` on `callback.message` in the test helpers — this makes
+  the mock pass isinstance checks against the real Message class.
+- mypy: `dict` without type args in model column (`Mapped[dict]`) and in test signatures. Fixed to
+  `Mapped[dict[str, object]]` and `dict[str, object]` respectively.
+- mypy: `0003_pending_actions` migration not in the pyproject.toml per-module ignore list (only
+  `0001_initial` and `0002_hnsw_index` were). Added `"0003_pending_actions"` to the override.
+- ruff SIM117: nested `with patch(...): with patch(...):` blocks. Collapsed to single `with`.
+- ruff F841: unused variables in test assertions. Removed dead diagnostic lines.
+
+**Deferred / PC gate:**
+
+- **MIGRATION REQUIRED on PC**: `alembic upgrade head` against real Postgres must apply
+  `0003_pending_actions` (creates table, enum, indexes). This is a schema change → real-DB gate
+  is mandatory before declaring done. Neon will receive this migration on next deploy.
+- PC: `pytest -v` full suite including real-DB integration tests (0 skipped).
+- PC: `docker compose up --build` + `/health` 200.
+- Live end-to-end proof on phone: trigger `dummy_confirm_action` → proposal + buttons → tap
+  Confirm → "✅ Done." / tap Cancel → "❌ Cancelled." / let expire → "⏰ Action expired." /
+  restart bot mid-pending → buttons still work.
+- Next slice: plug in Instagram auto-post as the first real `requires_approval` consumer.
+  The `ApprovalTestPlugin` can be removed or kept for testing when Instagram lands.
+
+---
+
 ## 2026-07-16 — Slice 1: Vision input + photo critique
 
 **What was built:**

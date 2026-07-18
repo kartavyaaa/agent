@@ -1,17 +1,24 @@
 """Telegram message handlers — thin translator only.
 
-Allowed imports from core: core.schemas.CoreRequest, core.schemas.CoreResponse.
-No other core imports; no business logic here.
+Allowed imports from core: core.schemas.CoreRequest, core.schemas.CoreResponse,
+core.schemas.ProposalPayload, core.exceptions. No business logic here.
 """
 
 from __future__ import annotations
 
 import base64
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from clients.errors import _GENERIC_FALLBACK, user_message
 from clients.user_helper import get_or_create_user_by_telegram_id
@@ -22,6 +29,36 @@ log = structlog.get_logger()
 router = Router()
 
 _FALLBACK = "(No response.)"
+
+
+def _make_approval_keyboard(pending_action_id: uuid.UUID) -> InlineKeyboardMarkup:
+    pid = str(pending_action_id)
+    # "ok:{uuid}" = 39 bytes, "no:{uuid}" = 39 bytes — both within Telegram's 64-byte limit.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Confirm", callback_data=f"ok:{pid}"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"no:{pid}"),
+            ]
+        ]
+    )
+
+
+async def _send_response(message: Message, response: CoreResponse) -> None:
+    """Send engine response to the user. Handles proposal (inline buttons) and normal text."""
+    if response.proposal is not None:
+        keyboard = _make_approval_keyboard(response.proposal.pending_action_id)
+        await message.answer(response.proposal.preview_text, reply_markup=keyboard)
+        return
+
+    from clients.telegram.formatters import format_response  # lazy import
+
+    chunks = format_response(response.content)
+    if not chunks:
+        await message.answer(_FALLBACK)
+    else:
+        for chunk_text, chunk_entities in chunks:
+            await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
 
 
 @router.message(F.photo)
@@ -64,14 +101,7 @@ async def handle_photo(
     )
     try:
         response: CoreResponse = await engine.handle_request(request)
-        from clients.telegram.formatters import format_response
-
-        chunks = format_response(response.content)
-        if not chunks:
-            await message.answer(_FALLBACK)
-        else:
-            for chunk_text, chunk_entities in chunks:
-                await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
+        await _send_response(message, response)
     except PlatformError as exc:
         log.warning(
             "telegram.handle_photo.platform_error",
@@ -105,16 +135,7 @@ async def handle_message(
     request = CoreRequest(user_id=user_id, content=message.text)
     try:
         response: CoreResponse = await engine.handle_request(request)
-        from clients.telegram.formatters import (  # lazy: import only on success path; keeps error paths importable without telegramify_markdown
-            format_response,
-        )
-
-        chunks = format_response(response.content)
-        if not chunks:
-            await message.answer(_FALLBACK)
-        else:
-            for chunk_text, chunk_entities in chunks:
-                await message.answer(chunk_text, entities=chunk_entities, parse_mode=None)
+        await _send_response(message, response)
     except PlatformError as exc:
         log.warning(
             "telegram.handle_message.platform_error",
@@ -125,3 +146,132 @@ async def handle_message(
     except Exception:
         log.exception("telegram.handle_message.unexpected_error")
         await message.answer(_GENERIC_FALLBACK)
+
+
+@router.callback_query()
+async def handle_callback(
+    callback: CallbackQuery,
+    session_factory: Any,
+    registry: Any,
+    allowed_user_ids: frozenset[int],
+) -> None:
+    """Handle inline button presses for approval flow.
+
+    Guards (in order): allowlist, data format, UUID validity, row existence,
+    user ownership, status (non-pending rejected), expiry. On "ok": claim the
+    row by setting status="executing" and committing BEFORE calling execute() —
+    this prevents double-execution if the process crashes between execute() and
+    the final commit.
+    """
+    if not callback.from_user:
+        await callback.answer()
+        return
+
+    if callback.from_user.id not in allowed_user_ids:
+        await callback.answer()
+        return
+
+    data = callback.data or ""
+    if not (data.startswith("ok:") or data.startswith("no:")):
+        await callback.answer()
+        return
+
+    choice = data[:2]  # "ok" or "no"
+    pending_id_str = data[3:]
+    try:
+        pending_id = uuid.UUID(pending_id_str)
+    except ValueError:
+        await callback.answer("Invalid action ID.")
+        return
+
+    from sqlalchemy import select
+
+    from models.pending_action import PendingAction
+
+    async with session_factory() as db:
+        try:
+            result = await db.execute(select(PendingAction).where(PendingAction.id == pending_id))
+            row = result.scalar_one_or_none()
+
+            user_id = await get_or_create_user_by_telegram_id(db, callback.from_user.id)
+            now = datetime.now(UTC)
+
+            if row is None or row.user_id != user_id:
+                await callback.answer("Action not found.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                return
+
+            if row.status != "pending":
+                # Covers "executing" (crash-recovery claim), "confirmed", "cancelled",
+                # "expired", "failed" — none should execute again.
+                await callback.answer("This action was already handled.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                return
+
+            if row.expires_at <= now:
+                row.status = "expired"
+                await db.flush()
+                await db.commit()
+                await callback.answer("This action has expired.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_text("⏰ Action expired.", reply_markup=None)
+                return
+
+            if choice == "no":
+                row.status = "cancelled"
+                await db.flush()
+                await db.commit()
+                await callback.answer("Cancelled.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_text("❌ Cancelled.", reply_markup=None)
+                return
+
+            # choice == "ok"
+            # Claim the row BEFORE executing to prevent double-execution on crash.
+            # Any concurrent tap or post-crash re-tap sees "executing" (non-pending)
+            # and is rejected by the status guard above.
+            row.status = "executing"
+            await db.flush()
+            await db.commit()
+
+            try:
+                await registry.execute(
+                    row.action_type,
+                    row.action_payload,
+                    user_id=user_id,
+                    db=db,
+                    _approved=True,
+                )
+                row.status = "confirmed"
+                await db.flush()
+                await db.commit()
+                await callback.answer("Done!")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_text("✅ Done.", reply_markup=None)
+            except PlatformError as exc:
+                row.status = "failed"
+                await db.flush()
+                await db.commit()
+                log.warning(
+                    "callback.execute_platform_error",
+                    action_type=row.action_type,
+                    exc_type=type(exc).__name__,
+                )
+                msg = user_message(exc)
+                await callback.answer("Failed.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_text(f"❌ {msg}", reply_markup=None)
+            except Exception:
+                row.status = "failed"
+                await db.flush()
+                await db.commit()
+                log.exception("callback.execute_unexpected_error", action_type=row.action_type)
+                await callback.answer("Failed.")
+                if isinstance(callback.message, Message):
+                    await callback.message.edit_text("❌ Execution failed.", reply_markup=None)
+
+        except Exception:
+            log.exception("callback.unexpected_error")
+            await callback.answer("Something went wrong.")

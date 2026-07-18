@@ -21,6 +21,7 @@ from core.memory.manager import MemoryManager
 from core.tools.registry import ToolRegistry
 from integrations.local_fs import LocalFsClient
 from integrations.serper import SerperClient
+from plugins.approval_test.plugin import ApprovalTestPlugin
 from plugins.file_reader.plugin import FileReaderPlugin
 from plugins.reminders.cancel import CancelReminderPlugin
 from plugins.reminders.list import ListRemindersPlugin
@@ -59,6 +60,7 @@ async def build_engine(
     )
     memory = MemoryManager(llm=llm, settings=s)
     registry = ToolRegistry()
+    registry.register(ApprovalTestPlugin())
     registry.register(RemindersPlugin(tz_name=s.default_timezone))
     registry.register(ListRemindersPlugin(tz_name=s.default_timezone))
     registry.register(CancelReminderPlugin())

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from models.base import Base
 from models.memory import Memory
+from models.pending_action import PendingAction
 from models.plugin_registry import PluginRegistry
 from models.project import Project
 from models.reminder import Reminder
@@ -18,6 +19,7 @@ from models.user import User
 __all__ = [
     "Base",
     "Memory",
+    "PendingAction",
     "PluginRegistry",
     "Project",
     "Reminder",

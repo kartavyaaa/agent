@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     # Worker (arq)
     worker_queue_name: str = "arq:queue"
     reminder_poll_interval_seconds: int = 60
+    approval_ttl_minutes: int = 60  # how long a pending action stays valid
 
     # Memory / history
     conversation_history_turns: int = 10
