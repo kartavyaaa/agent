@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from dataclasses import dataclass
 
@@ -10,6 +11,10 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from core.exceptions import IntegrationError
 
 _log = structlog.get_logger()
+
+# Container readiness poll: max attempts × interval = ~18s ceiling before giving up.
+_POLL_INTERVAL_S = 3
+_POLL_MAX_ATTEMPTS = 6
 
 # Confirmed from probe: graph.instagram.com, v21.0
 _IG_BASE = "https://graph.instagram.com/v21.0"
@@ -81,6 +86,43 @@ class InstagramClient:
             )
         resp.raise_for_status()  # 5xx → HTTPStatusError → tenacity retries
 
+    async def _wait_until_ready(self, creation_id: str) -> None:
+        """Poll the container status until FINISHED, ERROR, or the attempt cap is hit.
+
+        IG processes the image asynchronously after /media returns. Publishing before
+        status_code == FINISHED results in code 9007 / subcode 2207027 "Media ID is not
+        available". Poll with a fixed interval rather than tenacity so the retry loop is
+        explicit and bounded.
+        """
+        for attempt in range(1, _POLL_MAX_ATTEMPTS + 1):
+            resp = await self._client.get(
+                f"{_IG_BASE}/{creation_id}",
+                params={"fields": "status_code", "access_token": self._access_token},
+                timeout=self._timeout,
+            )
+            self._check_response(resp, step="status_poll")
+            status_code: str = resp.json().get("status_code", "UNKNOWN")
+            _log.debug(
+                "instagram.container_status",
+                creation_id=creation_id,
+                attempt=attempt,
+                status_code=status_code,
+            )
+            if status_code == "FINISHED":
+                return
+            if status_code in ("ERROR", "EXPIRED"):
+                raise IntegrationError(
+                    f"Instagram container {creation_id} reached terminal status: {status_code}"
+                )
+            # IN_PROGRESS or unexpected value — wait and retry
+            if attempt < _POLL_MAX_ATTEMPTS:
+                await asyncio.sleep(_POLL_INTERVAL_S)
+
+        elapsed = _POLL_INTERVAL_S * _POLL_MAX_ATTEMPTS
+        raise IntegrationError(
+            f"Instagram container still processing after {elapsed}s — try again in a moment."
+        )
+
     @retry(
         retry=retry_if_exception(_is_retryable),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -91,7 +133,9 @@ class InstagramClient:
         """Publish a photo to Instagram. Returns the published media id.
 
         Step 1: create a media container (/media).
-        Step 2: publish it (/media_publish). Back-to-back, no readiness wait needed (proven).
+        Step 2: poll status_code until FINISHED (IG processes asynchronously; publishing
+                before FINISHED → code 9007 "Media ID is not available").
+        Step 3: publish (/media_publish).
         """
         resp1 = await self._client.post(
             f"{_IG_BASE}/{self._ig_user_id}/media",
@@ -104,6 +148,8 @@ class InstagramClient:
         )
         self._check_response(resp1, step="media")
         creation_id: str = resp1.json()["id"]
+
+        await self._wait_until_ready(creation_id)
 
         resp2 = await self._client.post(
             f"{_IG_BASE}/{self._ig_user_id}/media_publish",

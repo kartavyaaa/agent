@@ -27,18 +27,32 @@ def _json_resp(data: dict[str, object], status_code: int = 200) -> MagicMock:
 
 
 def _make_client(
-    media_resp: MagicMock | None = None,
-    publish_resp: MagicMock | None = None,
     *,
-    side_effect: Exception | None = None,
+    media_resp: MagicMock | None = None,
+    status_resps: list[MagicMock] | None = None,
+    publish_resp: MagicMock | None = None,
+    post_side_effect: Exception | None = None,
 ) -> tuple[InstagramClient, MagicMock]:
+    """Build a mock InstagramClient.
+
+    Flow: POST /media → GET status_code (1+ times) → POST /media_publish.
+    - media_resp: response for POST /media (default: {"id": "creation-123"}, 200)
+    - status_resps: list of GET /status_code responses (default: [FINISHED])
+    - publish_resp: response for POST /media_publish (default: {"id": "media-456"}, 200)
+    - post_side_effect: if set, all POST calls raise this exception
+    """
     http = MagicMock(spec=httpx.AsyncClient)
-    if side_effect is not None:
-        http.post = AsyncMock(side_effect=side_effect)
+
+    if post_side_effect is not None:
+        http.post = AsyncMock(side_effect=post_side_effect)
     else:
         _media = media_resp or _json_resp({"id": "creation-123"})
         _pub = publish_resp or _json_resp({"id": "media-456"})
         http.post = AsyncMock(side_effect=[_media, _pub])
+
+    _statuses = status_resps or [_json_resp({"id": "creation-123", "status_code": "FINISHED"})]
+    http.get = AsyncMock(side_effect=_statuses)
+
     ig = InstagramClient(
         access_token="tok",
         ig_user_id="17841407153636057",
@@ -60,20 +74,26 @@ async def test_publish_photo_returns_media_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_photo_makes_two_posts_in_order() -> None:
+async def test_publish_photo_three_step_order() -> None:
+    """POST /media → GET status → POST /media_publish."""
     ig, http = _make_client()
     await ig.publish_photo(image_url="https://cdn.example.com/img.jpg", caption="test caption")
 
     assert http.post.call_count == 2
-    first_call, second_call = http.post.call_args_list
-    # First call: /media endpoint
-    assert "/media" in first_call.args[0]
-    assert "media_publish" not in first_call.args[0]
-    assert first_call.kwargs["params"]["image_url"] == "https://cdn.example.com/img.jpg"
-    assert first_call.kwargs["params"]["caption"] == "test caption"
-    # Second call: /media_publish endpoint
-    assert "media_publish" in second_call.args[0]
-    assert second_call.kwargs["params"]["creation_id"] == "creation-123"
+    assert http.get.call_count == 1
+
+    first_post, second_post = http.post.call_args_list
+    assert "/media" in first_post.args[0]
+    assert "media_publish" not in first_post.args[0]
+    assert first_post.kwargs["params"]["image_url"] == "https://cdn.example.com/img.jpg"
+    assert first_post.kwargs["params"]["caption"] == "test caption"
+
+    get_call = http.get.call_args_list[0]
+    assert "creation-123" in get_call.args[0]
+    assert get_call.kwargs["params"]["fields"] == "status_code"
+
+    assert "media_publish" in second_post.args[0]
+    assert second_post.kwargs["params"]["creation_id"] == "creation-123"
 
 
 @pytest.mark.asyncio
@@ -85,13 +105,26 @@ async def test_publish_photo_passes_access_token() -> None:
     assert first_call.kwargs["params"]["access_token"] == "tok"
 
 
+@pytest.mark.asyncio
+async def test_publish_photo_polls_until_finished() -> None:
+    """If status is IN_PROGRESS then FINISHED, polls twice before publishing."""
+    in_progress = _json_resp({"id": "creation-123", "status_code": "IN_PROGRESS"})
+    finished = _json_resp({"id": "creation-123", "status_code": "FINISHED"})
+    ig, http = _make_client(status_resps=[in_progress, finished])
+
+    media_id = await ig.publish_photo(image_url="https://cdn.example.com/img.jpg", caption="x")
+
+    assert http.get.call_count == 2
+    assert media_id == "media-456"
+
+
 # ---------------------------------------------------------------------------
 # publish_photo() — error handling
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_publish_photo_4xx_raises_integration_error() -> None:
+async def test_publish_photo_4xx_on_media_raises_integration_error() -> None:
     media_resp = _json_resp(
         {"error": {"code": 100, "message": "Invalid parameter"}}, status_code=400
     )
@@ -126,10 +159,33 @@ async def test_publish_photo_token_in_message_raises_clear_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publish_photo_container_error_status_raises() -> None:
+    error_status = _json_resp({"id": "creation-123", "status_code": "ERROR"})
+    ig, _ = _make_client(status_resps=[error_status])
+
+    with pytest.raises(IntegrationError, match="terminal status: ERROR"):
+        await ig.publish_photo(image_url="https://cdn.example.com/img.jpg", caption="x")
+
+
+@pytest.mark.asyncio
+async def test_publish_photo_poll_timeout_raises() -> None:
+    """If the container never reaches FINISHED within the cap, raise a clear error."""
+    in_progress = _json_resp({"id": "creation-123", "status_code": "IN_PROGRESS"})
+    # Return IN_PROGRESS for all 6 poll attempts
+    ig, http = _make_client(status_resps=[in_progress] * 6)
+
+    with pytest.raises(IntegrationError, match="still processing"):
+        await ig.publish_photo(image_url="https://cdn.example.com/img.jpg", caption="x")
+
+    assert http.get.call_count == 6
+
+
+@pytest.mark.asyncio
 async def test_publish_photo_5xx_retries_three_times() -> None:
     media_resp = _json_resp({}, status_code=503)
     http = MagicMock(spec=httpx.AsyncClient)
     http.post = AsyncMock(return_value=media_resp)
+    http.get = AsyncMock()  # never reached — fails at /media
     ig = InstagramClient(access_token="tok", ig_user_id="123", http_client=http)
 
     with pytest.raises(httpx.HTTPStatusError):
@@ -140,7 +196,7 @@ async def test_publish_photo_5xx_retries_three_times() -> None:
 
 @pytest.mark.asyncio
 async def test_publish_photo_timeout_retries() -> None:
-    ig, http = _make_client(side_effect=httpx.TimeoutException("timeout"))
+    ig, http = _make_client(post_side_effect=httpx.TimeoutException("timeout"))
 
     with pytest.raises(httpx.TimeoutException):
         await ig.publish_photo(image_url="https://cdn.example.com/img.jpg", caption="x")
