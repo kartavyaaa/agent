@@ -199,6 +199,61 @@ no automated refresh is built (deferred).
 
 ---
 
+## 2026-07-20 — Fix: LLM double-confirm bug on approval-required tools
+
+**Problem:**
+
+After the Instagram slice landed (first post succeeded end-to-end), a second failure mode was
+observed: the LLM would sometimes reply in TEXT ("Should I post this?") instead of calling
+`instagram_post` directly. No tool call → no approval buttons → user replies "yes" in a new
+message → photo context gone (`image_base64` is per-turn, not persisted) → "Please send a photo."
+The approval flow was working correctly; the LLM was adding a redundant text confirmation step
+BEFORE calling the tool.
+
+**Root cause — two compounding issues:**
+
+1. **Plugin description said "The user must confirm before the post goes live."** — The LLM read
+   this and concluded it was responsible for getting confirmation via text. The approval flow's
+   buttons ARE the confirmation mechanism, but the description implied the LLM should ask first.
+   Classic mismatch: the description documented the user-facing behavior, not the LLM instruction.
+
+2. **System prompt had no guidance on approval-required tools.** Nothing told the LLM: "call these
+   tools directly — the system handles confirmation." The prompt also said "when the user sends a
+   photo, provide a thoughtful critique" with no carve-out for posting intent, so photo+post-request
+   sometimes defaulted to critique instead of tool call.
+
+**Fixes (prompt/description only — no logic, no schema, no migration):**
+
+- `plugins/instagram_post/plugin.py` — description rewritten: removed "must confirm" wording.
+  Now explicitly says: call this tool DIRECTLY with the caption, do NOT ask for confirmation
+  yourself, the system shows the confirmation prompt automatically, only call when a photo is
+  present in the current message.
+
+- `core/engine.py` `_SYSTEM_PROMPT` — two additions:
+  (a) Photo routing: "if they explicitly ask to post/share to Instagram, call instagram_post
+      immediately with the caption; otherwise provide a critique." Critique remains the default.
+  (b) Approval-tool guidance: "Some tools require user approval. Call them directly with the
+      required arguments — do NOT ask for text confirmation first. The system presents a
+      confirmation prompt automatically. Asking yourself is redundant and breaks the flow because
+      photo context is not available in a later reply."
+
+**Key lesson:**
+
+For any `requires_approval` tool, the plugin description AND the system prompt must both
+explicitly tell the LLM to call the tool immediately. The LLM's natural instinct when it reads
+"requires confirmation" is to ask in text — the description must counteract this by making clear
+that the confirmation UI is the system's job, not the LLM's. This is a general pattern: whenever
+the platform handles a UX step (approval, file upload, etc.), the prompts must say "don't do this
+yourself, call the tool and let the system handle it."
+
+**Verification:**
+
+- `/verify` (ruff + black + mypy): clean, 0 issues.
+- Real validation is live: send photo + post intent → LLM calls `instagram_post` directly →
+  buttons appear immediately, no text "should I post?" step.
+
+---
+
 ## 2026-07-16 — Slice 1: Vision input + photo critique
 
 **What was built:**

@@ -30,8 +30,10 @@ class InstagramPostPlugin(PluginBase):
     version: ClassVar[str] = "1.0.0"
     description: ClassVar[str] = (
         "Post a photo to Instagram with a caption. "
-        "Use this when the user wants to share their photo on Instagram. "
-        "The user must confirm before the post goes live."
+        "Use this when the user explicitly asks to post or share their photo on Instagram. "
+        "Call this tool DIRECTLY with the caption — do NOT ask the user for confirmation yourself first. "
+        "The system automatically shows the user a confirmation prompt with buttons before anything is posted. "
+        "Only call this on a turn where the user has actually sent a photo in the current message."
     )
     capabilities: ClassVar[list[str]] = ["instagram_post"]
     permissions: ClassVar[list[str]] = ["network:write", "social:instagram"]

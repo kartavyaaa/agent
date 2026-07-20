@@ -32,8 +32,14 @@ _SYSTEM_PROMPT = (
     "When the user mentions a time, interpret it in their timezone ({tz}). "
     "When calling create_reminder, always emit remind_at as an absolute UTC ISO timestamp "
     "(e.g. 2026-07-14T03:30:00Z). "
-    "When the user sends a photo, provide a thoughtful critique covering composition, "
-    "lighting, subject, and suggestions for improvement. "
+    "When the user sends a photo: if they explicitly ask to post or share it to Instagram, "
+    "call instagram_post immediately with the caption; otherwise provide a thoughtful critique "
+    "covering composition, lighting, subject, and suggestions for improvement. "
+    "Some tools (like instagram_post) require user approval before they run. "
+    "For these, call the tool directly with the required arguments — do NOT ask the user for "
+    "confirmation in text first. The system automatically presents a confirmation prompt with "
+    "buttons before the action executes. Asking for confirmation yourself is redundant and "
+    "breaks the flow because photo context is not available in a later reply. "
     "When all necessary actions are complete, reply directly to the user."
 )
 

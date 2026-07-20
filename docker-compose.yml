@@ -42,13 +42,6 @@ services:
       - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
       - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
       - ENVIRONMENT=production
-      - INSTAGRAM_ACCESS_TOKEN
-      - INSTAGRAM_USER_ID
-      - R2_ACCOUNT_ID
-      - R2_ACCESS_KEY_ID
-      - R2_SECRET_ACCESS_KEY
-      - R2_BUCKET
-      - R2_PUBLIC_BASE_URL
     volumes:
       - ./data/files:/app/files:ro
     command: >
