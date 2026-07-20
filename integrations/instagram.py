@@ -4,9 +4,12 @@ import contextlib
 from dataclasses import dataclass
 
 import httpx
+import structlog
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from core.exceptions import IntegrationError
+
+_log = structlog.get_logger()
 
 # Confirmed from probe: graph.instagram.com, v21.0
 _IG_BASE = "https://graph.instagram.com/v21.0"
@@ -46,7 +49,7 @@ class InstagramClient:
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient()
 
-    def _check_response(self, resp: httpx.Response) -> None:
+    def _check_response(self, resp: httpx.Response, *, step: str = "") -> None:
         """Raise IntegrationError with a clear message for 4xx responses."""
         if 400 <= resp.status_code < 500:
             body: dict[object, object] = {}
@@ -57,12 +60,25 @@ class InstagramClient:
                 err = {}
             msg: str = str(err.get("message", "")) or f"HTTP {resp.status_code}"
             code = err.get("code", 0)
+            subcode = err.get("error_subcode", "")
+            # Log the full body so we can diagnose without guessing.
+            _log.warning(
+                "instagram.api_error",
+                step=step,
+                status=resp.status_code,
+                code=code,
+                subcode=subcode,
+                message=msg,
+                body=body,
+            )
             # Error code 190 = invalid/expired OAuth token.
             if code == 190 or "token" in msg.lower() or "expired" in msg.lower():
                 raise IntegrationError(
                     "Instagram access token has expired or is invalid — needs refresh in .env"
                 )
-            raise IntegrationError(f"Instagram API error: {msg}")
+            raise IntegrationError(
+                f"Instagram API error [{step}] code={code} subcode={subcode}: {msg}"
+            )
         resp.raise_for_status()  # 5xx → HTTPStatusError → tenacity retries
 
     @retry(
@@ -86,7 +102,7 @@ class InstagramClient:
             },
             timeout=self._timeout,
         )
-        self._check_response(resp1)
+        self._check_response(resp1, step="media")
         creation_id: str = resp1.json()["id"]
 
         resp2 = await self._client.post(
@@ -97,7 +113,7 @@ class InstagramClient:
             },
             timeout=self._timeout,
         )
-        self._check_response(resp2)
+        self._check_response(resp2, step="media_publish")
         return str(resp2.json()["id"])
 
     async def health_check(self) -> bool:
