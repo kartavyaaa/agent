@@ -1,8 +1,8 @@
-"""Add pending_actions table for human-in-the-loop approval flow.
+"""Add pending_actions table for the engine approval flow.
 
 Revision ID: 0003
 Revises: 0002
-Create Date: 2026-07-17
+Create Date: 2026-07-21
 """
 
 from __future__ import annotations
@@ -68,8 +68,7 @@ def upgrade() -> None:
 
     op.create_index("ix_pending_actions_user_id", "pending_actions", ["user_id"])
 
-    # Partial unique index: at most one pending action per user.
-    # Raw DDL required — SQLAlchemy Index does not generate partial unique indexes.
+    # Partial unique index: at most one pending action per user at a time.
     op.execute(
         "CREATE UNIQUE INDEX uq_pending_actions_user_pending "
         "ON pending_actions (user_id) "

@@ -51,6 +51,7 @@ _ENUM_DDL = [
     "CREATE TYPE project_status AS ENUM ('active','archived','deleted')",
     "CREATE TYPE plugin_health_status AS ENUM ('healthy','degraded','unhealthy','unknown')",
     "CREATE TYPE pending_action_status AS ENUM ('pending','executing','confirmed','cancelled','expired','failed')",
+    "CREATE TYPE scheduled_post_status AS ENUM ('scheduled','triggered','posted','cancelled','failed')",
 ]
 
 # Legitimately absent from model side: HNSW index needs pgvector DDL,

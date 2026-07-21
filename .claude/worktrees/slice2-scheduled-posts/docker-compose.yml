@@ -1,0 +1,112 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+ 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+ 
+  app:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL
+      - REDIS_URL
+      - OPENAI_API_KEY
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_WEBHOOK_SECRET
+      - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
+      - ENVIRONMENT=production
+    volumes:
+      - ./data/files:/app/files:ro
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn clients.api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+ 
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL
+      - REDIS_URL
+      - OPENAI_API_KEY
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_WEBHOOK_SECRET
+      - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
+      - ENVIRONMENT=production
+    volumes:
+      - ./data/files:/app/files:ro
+    command: python -m arq infra.worker.worker_settings.WorkerSettings
+
+  bot:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL
+      - REDIS_URL
+      - OPENAI_API_KEY
+      - TELEGRAM_BOT_TOKEN
+      - TELEGRAM_WEBHOOK_SECRET
+      - TELEGRAM_ALLOWED_USER_IDS
+      - SERPER_API_KEY
+      - FILE_READER_ROOT=/app/files
+      - FILE_READER_MAX_BYTES=${FILE_READER_MAX_BYTES:-1048576}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-Asia/Kolkata}
+      - ENVIRONMENT=production
+      - INSTAGRAM_ACCESS_TOKEN
+      - INSTAGRAM_USER_ID
+      - R2_ACCOUNT_ID
+      - R2_ACCESS_KEY_ID
+      - R2_SECRET_ACCESS_KEY
+      - R2_BUCKET
+      - R2_PUBLIC_BASE_URL
+    volumes:
+      - ./data/files:/app/files:ro
+    command: python -m clients.telegram
+
+volumes:
+  pgdata: {}
