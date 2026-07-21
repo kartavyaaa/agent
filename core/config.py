@@ -27,9 +27,9 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: SecretStr
-    # gpt-5.5: complex planning, final synthesis, memory scoring
-    # Provisional: re-verify snapshot ID + pricing at Phase 1 implementation time.
-    openai_default_model: str = "gpt-5.5"
+    # gpt-5.4: production workhorse — half the cost of gpt-5.5, strong for planning/vision.
+    # Override via OPENAI_DEFAULT_MODEL in .env (no rebuild needed).
+    openai_default_model: str = "gpt-5.4"
     # gpt-5.4-nano: cheap/fast steps — classification, tool-result summarisation
     # Provisional: re-verify snapshot ID + pricing at Phase 1 implementation time.
     openai_fast_model: str = "gpt-5.4-nano"

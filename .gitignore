@@ -16,3 +16,6 @@ dist/
 build/
 *.egg-info/
 data/
+
+# Throwaway probe scripts
+probe/

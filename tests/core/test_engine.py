@@ -14,7 +14,7 @@ import pytest
 from core.engine import CoreEngine
 from core.llm.base import LLMMessage, LLMResponse, LLMToolCall, TokenUsage
 from core.memory.manager import ScoredMemory
-from core.schemas import CoreRequest, CoreResponse
+from core.schemas import CoreRequest, CoreResponse, ImageAttachment
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,7 +88,7 @@ def _make_engine(
     mock_memory.semantic_search = AsyncMock(return_value=[])
 
     mock_settings = MagicMock()
-    mock_settings.openai_default_model = "gpt-5.5"
+    mock_settings.openai_default_model = "gpt-5.4"
     mock_settings.planner_max_iterations = 8
     mock_settings.planner_default_temperature = None
     mock_settings.default_timezone = "Asia/Kolkata"
@@ -472,3 +472,140 @@ async def test_text_only_request_unchanged() -> None:
     user_msg = _get_user_msg(mock_llm)
     assert isinstance(user_msg.content, str)
     assert user_msg.content == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Batch image / album path
+# ---------------------------------------------------------------------------
+
+_FAKE_IA = ImageAttachment(data=_FAKE_B64, mime=_FAKE_MIME)
+
+
+@pytest.mark.asyncio
+async def test_batch_images_builds_content_part_list() -> None:
+    """Batch images build a content-part list: N input_image parts then one input_text."""
+    engine, _, mock_llm, _, _ = _make_engine()
+    caption = "Plan these for the grid"
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content=caption,
+            images=[_FAKE_IA, _FAKE_IA, _FAKE_IA],
+        )
+    )
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, list)
+    parts = user_msg.content
+    assert len(parts) == 4  # 3 images + 1 text
+
+    image_parts = [p for p in parts if p["type"] == "input_image"]
+    assert len(image_parts) == 3
+    for part in image_parts:
+        assert part["image_url"] == f"data:{_FAKE_MIME};base64,{_FAKE_B64}"
+
+    text_parts = [p for p in parts if p["type"] == "input_text"]
+    assert len(text_parts) == 1
+    assert text_parts[0]["text"] == caption
+
+
+@pytest.mark.asyncio
+async def test_batch_images_detail_high() -> None:
+    """Every input_image part in a batch must carry detail='high'."""
+    engine, _, mock_llm, _, _ = _make_engine()
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content="content plan",
+            images=[_FAKE_IA, _FAKE_IA],
+        )
+    )
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, list)
+    image_parts = [p for p in user_msg.content if p["type"] == "input_image"]
+    for part in image_parts:
+        assert part.get("detail") == "high"
+
+
+@pytest.mark.asyncio
+async def test_batch_images_precedence_over_single() -> None:
+    """When both images and image_base64 are set, the batch (images) wins."""
+    engine, _, mock_llm, _, _ = _make_engine()
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content="plan",
+            images=[_FAKE_IA, _FAKE_IA],
+            image_base64=_FAKE_B64,
+            image_mime=_FAKE_MIME,
+        )
+    )
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, list)
+    image_parts = [p for p in user_msg.content if p["type"] == "input_image"]
+    assert len(image_parts) == 2  # batch wins — not 1 (single)
+
+
+@pytest.mark.asyncio
+async def test_batch_images_semantic_search_receives_string() -> None:
+    """Semantic search must receive the string caption, never image bytes."""
+    engine, _, _, _, mock_memory = _make_engine()
+    caption = "batch caption"
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content=caption,
+            images=[_FAKE_IA, _FAKE_IA],
+        )
+    )
+
+    call_kwargs = mock_memory.semantic_search.call_args.kwargs
+    assert call_kwargs["query"] == caption
+    assert _FAKE_B64 not in call_kwargs["query"]
+
+
+@pytest.mark.asyncio
+async def test_batch_images_memory_write_receives_string() -> None:
+    """Episodic memory write must use the string caption, never image bytes."""
+    engine, _, _, _, mock_memory = _make_engine(llm_response=_message_response("Great batch!"))
+    caption = "batch caption"
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content=caption,
+            images=[_FAKE_IA],
+        )
+    )
+
+    write_kwargs = mock_memory.write.call_args.kwargs
+    written: str = write_kwargs["content"]
+    assert written.startswith(f"User: {caption}")
+    assert _FAKE_B64 not in written
+
+
+@pytest.mark.asyncio
+async def test_single_image_no_detail_key() -> None:
+    """Single-image path must NOT set a detail key (only the batch path does)."""
+    engine, _, mock_llm, _, _ = _make_engine()
+
+    await engine.handle_request(
+        CoreRequest(
+            user_id=uuid.uuid4(),
+            content="critique this",
+            image_base64=_FAKE_B64,
+            image_mime=_FAKE_MIME,
+        )
+    )
+
+    user_msg = _get_user_msg(mock_llm)
+    assert isinstance(user_msg.content, list)
+    image_parts = [p for p in user_msg.content if p["type"] == "input_image"]
+    assert len(image_parts) == 1
+    assert "detail" not in image_parts[0]

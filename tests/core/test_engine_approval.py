@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import uuid
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +15,7 @@ from core.engine import CoreEngine
 from core.llm.base import LLMResponse, TokenUsage
 from core.planner.base import PendingActionProposal, PlannerResult
 from core.schemas import CoreRequest
+from core.tools.registry import ToolRegistry
 from plugins.base import HealthStatus, PluginBase
 
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ def _make_engine_with_db(
     mock_db: MagicMock,
     *,
     r2: MagicMock | None = None,
-    registry: MagicMock | None = None,
+    registry: MagicMock | ToolRegistry | None = None,
 ) -> CoreEngine:
     mock_factory = MagicMock()
     mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
@@ -92,7 +93,7 @@ def _make_engine_with_db(
     mock_memory.semantic_search = AsyncMock(return_value=[])
 
     mock_settings = MagicMock()
-    mock_settings.openai_default_model = "gpt-5.5"
+    mock_settings.openai_default_model = "gpt-5.4"
     mock_settings.planner_max_iterations = 8
     mock_settings.planner_default_temperature = None
     mock_settings.default_timezone = "UTC"
@@ -229,7 +230,7 @@ class _ImagePlugin(PluginBase):
     needs_hosted_image: ClassVar[bool] = True
 
     async def execute(
-        self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession
+        self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession, **kwargs: Any
     ) -> _FakeOutput:
         assert isinstance(input, _FakeInput)
         return _FakeOutput(result=input.caption)
@@ -240,9 +241,7 @@ class _ImagePlugin(PluginBase):
         return HealthStatus(status="healthy", message="ok", checked_at=datetime.now(UTC))
 
 
-def _make_registry_with_image_plugin() -> MagicMock:
-    from core.tools.registry import ToolRegistry
-
+def _make_registry_with_image_plugin() -> ToolRegistry:
     plugin = _ImagePlugin()
     real_registry = ToolRegistry()
     real_registry.register(plugin)

@@ -170,7 +170,7 @@ async def test_reminder_round_trip(
     mock_llm = _mock_llm()
 
     settings = MagicMock()
-    settings.openai_default_model = "gpt-5.5"
+    settings.openai_default_model = "gpt-5.4"
     settings.openai_embedding_model = "text-embedding-3-small"
     settings.planner_max_iterations = 8
     settings.planner_default_temperature = 0.7

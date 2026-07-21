@@ -6,6 +6,7 @@ core.schemas.ProposalPayload, core.exceptions. No business logic here.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import uuid
 from datetime import UTC, datetime
@@ -23,12 +24,26 @@ from aiogram.types import (
 from clients.errors import _GENERIC_FALLBACK, user_message
 from clients.user_helper import get_or_create_user_by_telegram_id
 from core.exceptions import PlatformError
-from core.schemas import CoreRequest, CoreResponse  # only public types
+from core.schemas import CoreRequest, CoreResponse, ImageAttachment  # only public types
 
 log = structlog.get_logger()
 router = Router()
 
 _FALLBACK = "(No response.)"
+
+# Album default prompt — used when an album arrives with no caption.
+_DEFAULT_PLAN_PROMPT = (
+    "Create an Instagram content plan for these photos. "
+    "Group them into carousels or standalone posts (with reasons), suggest a caption and "
+    "hashtags for each, recommend a posting order, and share your take on which shots are "
+    "strongest — treat it as a suggestion, the final call is yours."
+)
+
+# Module-level state for media-group (album) debounce collection.
+# Keyed by media_group_id. asyncio is single-threaded so the append→cancel→restart
+# sequence in handle_photo is atomic (no await between them).
+_media_group_buffer: dict[str, list[Message]] = {}
+_media_group_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
 
 
 def _make_approval_keyboard(pending_action_id: uuid.UUID) -> InlineKeyboardMarkup:
@@ -75,6 +90,19 @@ async def handle_photo(
         log.info("telegram.photo.ignored", telegram_user_id=message.from_user.id)
         return
 
+    mgid = message.media_group_id
+    if mgid is not None:
+        # Album photo — buffer and debounce. The block below has no await, so append →
+        # cancel → restart is atomic from asyncio's perspective (single-threaded event loop).
+        _media_group_buffer.setdefault(mgid, []).append(message)
+        if mgid in _media_group_tasks:
+            _media_group_tasks[mgid].cancel()
+        _media_group_tasks[mgid] = asyncio.create_task(
+            _flush_media_group(mgid, engine, session_factory)
+        )
+        return
+
+    # Lone photo — existing single-photo path (critique / Instagram post).
     log.info("telegram.photo.received", telegram_user_id=message.from_user.id)
 
     async with session_factory() as db:
@@ -112,6 +140,81 @@ async def handle_photo(
     except Exception:
         log.exception("telegram.handle_photo.unexpected_error")
         await message.answer(_GENERIC_FALLBACK)
+
+
+async def _flush_media_group(
+    mgid: str,
+    engine: Any,
+    session_factory: Any,
+) -> None:
+    """Debounce coroutine: fires 1.5s after the last photo in an album arrives.
+
+    Cancel safety: CancelledError is caught only during sleep. A superseded task
+    (cancelled by a later photo) returns here without touching the shared dicts.
+    The replacement task, which was not cancelled, owns the buffer and flushes it.
+
+    Cleanup: both dicts are popped BEFORE any await that can fail, so entries
+    never leak regardless of downstream errors.
+
+    Straggler edge: a photo with the same mgid arriving after this flush popped
+    starts a fresh buffer and produces a second plan. Realistically impossible
+    (albums arrive within ~500ms; 1.5s window covers it) — accepted unguarded edge.
+    """
+    try:
+        await asyncio.sleep(1.5)
+    except asyncio.CancelledError:
+        # Superseded — replacement task owns the buffer. Exit without touching shared state.
+        return
+
+    # Pop both entries BEFORE any await that can fail — no dict leaks on errors.
+    msgs = _media_group_buffer.pop(mgid, [])
+    _media_group_tasks.pop(mgid, None)
+
+    if not msgs:
+        return
+
+    msgs.sort(key=lambda m: m.message_id)
+    first = msgs[0]
+
+    try:
+        assert first.from_user is not None
+        async with session_factory() as db:
+            user_id = await get_or_create_user_by_telegram_id(db, first.from_user.id)
+            await db.commit()
+
+        assert first.bot is not None
+        attachments: list[ImageAttachment] = []
+        for msg in msgs:
+            assert msg.photo is not None
+            photo = msg.photo[-1]
+            file = await first.bot.get_file(photo.file_id)
+            assert file.file_path is not None
+            buf = await first.bot.download_file(file.file_path)
+            assert buf is not None
+            attachments.append(
+                ImageAttachment(
+                    data=base64.b64encode(buf.read()).decode(),
+                    mime="image/jpeg",
+                )
+            )
+
+        caption = first.caption or _DEFAULT_PLAN_PROMPT
+        request = CoreRequest(user_id=user_id, content=caption, images=attachments)
+        log.info("telegram.album.flush", mgid=mgid, n=len(attachments))
+        response: CoreResponse = await engine.handle_request(request)
+        await _send_response(first, response)
+
+    except PlatformError as exc:
+        log.warning(
+            "telegram.album.platform_error",
+            mgid=mgid,
+            exc_type=type(exc).__name__,
+            error=str(exc),
+        )
+        await first.answer(user_message(exc))
+    except Exception:
+        log.exception("telegram.album.unexpected_error", mgid=mgid)
+        await first.answer(_GENERIC_FALLBACK)
 
 
 @router.message(F.text)

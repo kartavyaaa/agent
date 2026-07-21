@@ -6,6 +6,7 @@ get_or_create_user_by_telegram_id is patched at its imported name in handlers.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import uuid
@@ -18,7 +19,14 @@ pytest.importorskip(
     reason="telegramify-markdown not installed (PC-gate item; run pip install -e '.[dev]' on PC)",
 )
 
-from clients.telegram.handlers import handle_message, handle_photo  # noqa: E402
+from clients.telegram.handlers import (  # noqa: E402
+    _DEFAULT_PLAN_PROMPT,
+    _flush_media_group,
+    _media_group_buffer,
+    _media_group_tasks,
+    handle_message,
+    handle_photo,
+)
 from core.schemas import CoreResponse  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -273,6 +281,7 @@ def _make_photo_message(
     msg = MagicMock()
     msg.caption = caption
     msg.answer = AsyncMock()
+    msg.media_group_id = None  # lone photo (not part of an album)
     if from_user_id is None:
         msg.from_user = None
     else:
@@ -354,3 +363,288 @@ async def test_handle_photo_allowlist_passes_allowed_sender() -> None:
         await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({42}))
 
     engine.handle_request.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Album / media-group path
+# ---------------------------------------------------------------------------
+
+
+def _make_album_message(
+    mgid: str,
+    msg_id: int,
+    caption: str | None = None,
+    from_user_id: int = 12345,
+) -> MagicMock:
+    msg = MagicMock()
+    msg.media_group_id = mgid
+    msg.message_id = msg_id
+    msg.caption = caption
+    msg.answer = AsyncMock()
+    msg.from_user = MagicMock()
+    msg.from_user.id = from_user_id
+    photo = MagicMock()
+    photo.file_id = f"fid_{msg_id}"
+    msg.photo = [photo]
+    msg.bot = MagicMock()
+    msg.bot.get_file = AsyncMock(return_value=MagicMock(file_path=f"x/{msg_id}.jpg"))
+    msg.bot.download_file = AsyncMock(return_value=io.BytesIO(_FAKE_IMAGE_BYTES))
+    return msg
+
+
+def _patch_sleep_and_user(uid: uuid.UUID) -> tuple:  # type: ignore[type-arg]
+    """Context managers: patch asyncio.sleep to a no-op and user lookup to return uid."""
+    return (
+        patch("clients.telegram.handlers.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+            new=AsyncMock(return_value=uid),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_lone_photo_processes_immediately() -> None:
+    """A lone photo (media_group_id=None) is processed immediately via the single-photo path."""
+    uid = uuid.uuid4()
+    msg = _make_photo_message(caption="lone shot")
+    assert msg.media_group_id is None
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch(
+        "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+        new=AsyncMock(return_value=uid),
+    ):
+        await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({12345}))
+
+    engine.handle_request.assert_awaited_once()
+    req = engine.handle_request.call_args[0][0]
+    assert req.image_base64 == _FAKE_B64
+    assert req.images is None
+
+
+@pytest.mark.asyncio
+async def test_album_photo_buffered_not_processed_immediately() -> None:
+    """An album photo is buffered; engine is NOT called until debounce fires."""
+    uid = uuid.uuid4()
+    mgid = "group-001"
+    msg = _make_album_message(mgid, msg_id=1)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    # Patch sleep so the debounce task never actually fires during this test.
+    with patch("clients.telegram.handlers.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_sleep.side_effect = asyncio.CancelledError  # keep task suspended
+
+        with patch(
+            "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+            new=AsyncMock(return_value=uid),
+        ):
+            await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({12345}))
+
+    engine.handle_request.assert_not_awaited()
+    # Clean up task to avoid asyncio warnings
+    task = _media_group_tasks.pop(mgid, None)
+    _media_group_buffer.pop(mgid, None)
+    if task and not task.done():
+        task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_album_cancel_restart_on_second_photo() -> None:
+    """Sending a second album photo cancels the first task and creates a new one."""
+    uid = uuid.uuid4()
+    mgid = "group-002"
+    msg1 = _make_album_message(mgid, msg_id=1)
+    msg2 = _make_album_message(mgid, msg_id=2)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch("clients.telegram.handlers.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_sleep.side_effect = asyncio.CancelledError
+
+        with patch(
+            "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+            new=AsyncMock(return_value=uid),
+        ):
+            await handle_photo(msg1, engine, factory, allowed_user_ids=frozenset({12345}))
+            task1 = _media_group_tasks[mgid]
+            await handle_photo(msg2, engine, factory, allowed_user_ids=frozenset({12345}))
+            task2 = _media_group_tasks[mgid]
+
+    assert task1 is not task2
+    # task.cancel() only schedules CancelledError; await task1 so the event loop
+    # runs it to cancellation completion before asserting .cancelled().
+    with pytest.raises(asyncio.CancelledError):
+        await task1
+    assert task1.cancelled()
+
+    # Clean up
+    _media_group_tasks.pop(mgid, None)
+    _media_group_buffer.pop(mgid, None)
+    if task2 and not task2.done():
+        task2.cancel()
+
+
+@pytest.mark.asyncio
+async def test_album_flush_engine_called_once_with_image_list() -> None:
+    """After debounce, engine is called once with a CoreRequest carrying an images list."""
+    uid = uuid.uuid4()
+    mgid = "group-003"
+    msgs = [_make_album_message(mgid, msg_id=i) for i in range(1, 4)]
+    _media_group_buffer[mgid] = list(msgs)
+
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    sleep_patch, user_patch = _patch_sleep_and_user(uid)
+    with sleep_patch, user_patch:
+        await _flush_media_group(mgid, engine, factory)
+
+    engine.handle_request.assert_awaited_once()
+    req = engine.handle_request.call_args[0][0]
+    assert req.images is not None
+    assert len(req.images) == 3
+    assert req.image_base64 is None
+
+
+@pytest.mark.asyncio
+async def test_album_flush_uses_first_message_caption() -> None:
+    """When the first album message has a caption it becomes CoreRequest.content."""
+    uid = uuid.uuid4()
+    mgid = "group-004"
+    msgs = [
+        _make_album_message(mgid, msg_id=1, caption="plan these"),
+        _make_album_message(mgid, msg_id=2, caption=None),
+    ]
+    _media_group_buffer[mgid] = list(msgs)
+
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    sleep_patch, user_patch = _patch_sleep_and_user(uid)
+    with sleep_patch, user_patch:
+        await _flush_media_group(mgid, engine, factory)
+
+    req = engine.handle_request.call_args[0][0]
+    assert req.content == "plan these"
+
+
+@pytest.mark.asyncio
+async def test_album_flush_uses_default_prompt_when_no_caption() -> None:
+    """When no caption is present, the default plan prompt is used."""
+    uid = uuid.uuid4()
+    mgid = "group-005"
+    msgs = [_make_album_message(mgid, msg_id=i, caption=None) for i in range(1, 3)]
+    _media_group_buffer[mgid] = list(msgs)
+
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    sleep_patch, user_patch = _patch_sleep_and_user(uid)
+    with sleep_patch, user_patch:
+        await _flush_media_group(mgid, engine, factory)
+
+    req = engine.handle_request.call_args[0][0]
+    assert req.content == _DEFAULT_PLAN_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_album_flush_cleanup_on_engine_error() -> None:
+    """On engine error: buffer+tasks are cleaned up and the user gets a fallback message."""
+    uid = uuid.uuid4()
+    mgid = "group-006"
+    msgs = [_make_album_message(mgid, msg_id=1)]
+    _media_group_buffer[mgid] = list(msgs)
+
+    engine = MagicMock()
+    engine.handle_request = AsyncMock(side_effect=RuntimeError("boom"))
+    factory = _make_session_factory(uid)
+
+    sleep_patch, user_patch = _patch_sleep_and_user(uid)
+    with sleep_patch, user_patch:
+        await _flush_media_group(mgid, engine, factory)
+
+    assert mgid not in _media_group_buffer
+    assert mgid not in _media_group_tasks
+    msgs[0].answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_does_not_process() -> None:
+    """A cancelled (superseded) task exits during sleep without touching the buffer."""
+    uid = uuid.uuid4()
+    mgid = "group-007"
+    msgs = [_make_album_message(mgid, msg_id=1)]
+    _media_group_buffer[mgid] = list(msgs)
+
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    # Patch sleep to raise CancelledError (simulates task cancellation mid-sleep)
+    with (
+        patch(
+            "clients.telegram.handlers.asyncio.sleep",
+            new=AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch(
+            "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+            new=AsyncMock(return_value=uid),
+        ),
+    ):
+        await _flush_media_group(mgid, engine, factory)
+
+    engine.handle_request.assert_not_awaited()
+    # Buffer must be untouched by the cancelled task
+    assert mgid in _media_group_buffer
+    # Clean up
+    _media_group_buffer.pop(mgid, None)
+
+
+@pytest.mark.asyncio
+async def test_album_allowlist_enforced() -> None:
+    """Album photos from non-allowed users are not buffered."""
+    mgid = "group-008"
+    msg = _make_album_message(mgid, msg_id=1, from_user_id=9999)
+    engine = _make_engine()
+    factory = _make_session_factory(uuid.uuid4())
+
+    await handle_photo(msg, engine, factory, allowed_user_ids=frozenset({1}))
+
+    assert mgid not in _media_group_buffer
+    engine.handle_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_albums_no_cross_contamination() -> None:
+    """Two concurrent albums (different mgids) each get their own buffer entry."""
+    uid = uuid.uuid4()
+    mgid_a = "group-009a"
+    mgid_b = "group-009b"
+    msg_a = _make_album_message(mgid_a, msg_id=1)
+    msg_b = _make_album_message(mgid_b, msg_id=1)
+    engine = _make_engine()
+    factory = _make_session_factory(uid)
+
+    with patch("clients.telegram.handlers.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_sleep.side_effect = asyncio.CancelledError
+
+        with patch(
+            "clients.telegram.handlers.get_or_create_user_by_telegram_id",
+            new=AsyncMock(return_value=uid),
+        ):
+            await handle_photo(msg_a, engine, factory, allowed_user_ids=frozenset({12345}))
+            await handle_photo(msg_b, engine, factory, allowed_user_ids=frozenset({12345}))
+
+    assert mgid_a in _media_group_buffer
+    assert mgid_b in _media_group_buffer
+    assert _media_group_buffer[mgid_a][0] is msg_a
+    assert _media_group_buffer[mgid_b][0] is msg_b
+
+    # Clean up
+    for mgid in (mgid_a, mgid_b):
+        task = _media_group_tasks.pop(mgid, None)
+        _media_group_buffer.pop(mgid, None)
+        if task and not task.done():
+            task.cancel()

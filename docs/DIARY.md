@@ -2,6 +2,70 @@
 
 ---
 
+## 2026-07-20 — Part A: Model routing (gpt-5.5 → gpt-5.4) + Part B: Slice 1 multi-image content-plan
+
+### Part A — Model cost reduction
+
+**Change:** `openai_default_model` default changed from `"gpt-5.5"` to `"gpt-5.4"` in
+`core/config.py`. One-line change; overridable via `.env` with no rebuild. All ReAct planner
+turns and vision calls now use gpt-5.4 (half the input cost: $2.50/1M vs $5.00/1M).
+
+**Grounding:** Every LLM call routes through `openai_default_model` except file-reader
+summarization (already on `openai_fast_model` / gpt-5.4-nano). No per-turn classification or
+history-summarization calls exist — the ReAct loop handles everything in one model. No nano
+routing added (premature; no clear quality/cost boundary per call type yet). Vision stays on
+gpt-5.4 (probe confirmed quality holds at detail=high).
+
+**What was tricky:** Confirming completeness — grepping all `llm.complete` call sites across
+plugins to verify nothing was silently on the expensive model. Only `file_reader` had a separate
+model path.
+
+### Part B — Slice 1: multi-image album → text content-plan
+
+**What was built:**
+
+- `core/schemas.py`: Added `ImageAttachment(data: str, mime: str)` and
+  `images: list[ImageAttachment] | None` to `CoreRequest`. Single-image fields
+  (`image_base64`, `image_mime`) untouched.
+- `core/engine.py`: Three-branch content-part builder (precedence: `images` → `image_base64` →
+  plain text). Batch path builds `N × input_image` parts with `detail="high"` + one `input_text`.
+  System prompt updated to instruct the model on the batch case (groupings, captions, posting
+  order, strength as suggestion not verdict). Memory/semantic-search use `request.content` string
+  in all three paths — no image data ever reaches the DB.
+- `clients/telegram/handlers.py`: Album debounce pattern added to `handle_photo`. Module-level
+  `_media_group_buffer` and `_media_group_tasks` dicts, keyed by `media_group_id`. The
+  append→cancel→restart block is synchronous (no await), so atomic. `_flush_media_group` fires
+  1.5s after the last photo, pops both dicts before any failable await, sends the batch as one
+  `CoreRequest(images=[...])`. Cancel safety: `CancelledError` caught only during sleep; cancelled
+  tasks return before touching the buffer. No `finally` block — that would clobber shared state on
+  both paths.
+
+**Key insight — debounce cleanup:** The natural instinct is `try/finally` for cleanup, but a
+`finally` block runs on BOTH the cancellation path AND the completing path. A cancelled task
+must NOT touch the buffer (the replacement task owns it). Solution: catch `CancelledError`
+separately and `return` immediately; pop the dicts only on the completing path, BEFORE any
+await that could fail. This way: cancelled = no state touched; completing = dicts cleaned before
+I/O work, errors only affect the response send, never dict state.
+
+**Key insight — detail="high":** Probe confirmed ~10–20× more tokens vs "low" but cost still
+~2¢/plan for 8 images. Quality difference mattered: "high" produced compositional reasoning
+("off-center horizon, warm backlight") vs "low" generic labels. Use "high" for photography tools.
+
+**What was tricky:** `asyncio.sleep` patching in tests — patch at the call site module
+(`clients.telegram.handlers.asyncio.sleep`), not the stdlib. Also: `_make_photo_message` in
+existing tests needed `media_group_id = None` explicitly, because MagicMock auto-attributes are
+truthy and would route lone-photo tests into the album path.
+
+**Tests:** 16 new tests (6 engine batch-image + 10 handler album-path). All 240 pass on VM.
+Pre-existing mypy errors in `test_registry_approval.py` / `test_engine_approval.py` (fake plugin
+stub missing `**kwargs`) are not from this slice.
+
+**Deferred:** Multi-album batching (>10 photos across multiple sends), posting/scheduling
+(Slice 2+), analytics-driven timing (later). Straggler edge (photo arriving after flush, same
+mgid) accepted unguarded — realistically impossible at 1.5s debounce vs 500ms album delivery.
+
+---
+
 ## 2026-07-17 — Slice: Human-in-the-Loop Approval Flow
 
 **What was built:**

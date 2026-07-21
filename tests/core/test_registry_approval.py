@@ -38,7 +38,7 @@ class _NormalPlugin(PluginBase):
     requires_approval: ClassVar[bool] = False
 
     async def execute(
-        self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession
+        self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession, **kwargs: Any
     ) -> _FakeOutput:
         assert isinstance(input, _FakeInput)
         return _FakeOutput(result=input.value)
@@ -215,7 +215,7 @@ async def test_existing_user_id_db_injection_unchanged() -> None:
         name: ClassVar[str] = "tracking_plugin"
 
         async def execute(
-            self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession
+            self, input: BaseModel, *, user_id: uuid.UUID, db: AsyncSession, **kwargs: Any
         ) -> _FakeOutput:
             received["user_id"] = user_id
             received["db"] = db

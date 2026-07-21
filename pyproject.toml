@@ -69,6 +69,7 @@ target-version = ["py312"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+exclude = ["build/"]
 
 [[tool.mypy.overrides]]
 module = ["alembic.*", "alembic.env", "alembic.versions.*"]
