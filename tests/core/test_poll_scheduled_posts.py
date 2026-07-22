@@ -43,8 +43,10 @@ def _make_post(
         id=uuid.uuid4(),
         user_id=user_id,
         status=status,
+        post_type="single",
         scheduled_for=scheduled_for or (_NOW - timedelta(minutes=1)),
         image_url=image_url,
+        image_urls=None,
         caption=caption,
         pending_action_id=None,
     )

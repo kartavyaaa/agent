@@ -3,9 +3,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base
@@ -30,7 +30,14 @@ class ScheduledPost(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_type: Mapped[str] = mapped_column(String(20), server_default="single", nullable=False)
+    image_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_plans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     caption: Mapped[str] = mapped_column(Text, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(

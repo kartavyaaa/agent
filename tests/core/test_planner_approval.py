@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -54,6 +54,7 @@ async def test_sentinel_halts_loop_and_returns_pending_action() -> None:
     """Approval sentinel from registry causes the loop to return immediately."""
     llm = AsyncMock()
     registry = AsyncMock()
+    registry.get_plugin = MagicMock(return_value=None)
 
     llm.complete = AsyncMock(
         return_value=_llm_tool_response([_tool_call("approval_tool", {"message": "hi"})])
@@ -89,6 +90,7 @@ async def test_sentinel_mid_batch_discards_remaining_tools() -> None:
     """If sentinel fires on first tool in a batch, second tool is NOT called."""
     llm = AsyncMock()
     registry = AsyncMock()
+    registry.get_plugin = MagicMock(return_value=None)
 
     tc1 = _tool_call("approval_tool", {"message": "hi"}, call_id="c1")
     tc2 = _tool_call("safe_tool", {}, call_id="c2")

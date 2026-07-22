@@ -120,9 +120,13 @@ class ReActPlanner(PlannerBase):
                     _image_url_provider=image_url_provider,
                 )
                 if out.get("__approval_required__"):
-                    preview = (
-                        f"I'd like to run '{out['tool']}' with these parameters: {out['args']}"
-                    )
+                    plugin = self._registry.get_plugin(out["tool"])
+                    if plugin is not None:
+                        preview = plugin.build_preview(out["args"])
+                    else:
+                        preview = (
+                            f"I'd like to run '{out['tool']}' with these parameters: {out['args']}"
+                        )
                     log.info("planner.approval_required", tool=out["tool"])
                     return PlannerResult(
                         content="",

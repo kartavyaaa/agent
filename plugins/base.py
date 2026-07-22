@@ -46,6 +46,14 @@ class PluginBase(ABC):
     needs_hosted_image: ClassVar[bool] = False
     needs_hosted_images: ClassVar[bool] = False
 
+    @classmethod
+    def build_preview(cls, args: dict[str, Any]) -> str:
+        """Human-readable proposal summary shown before the Confirm tap.
+
+        Override in plugins that want richer text than the raw args dump.
+        """
+        return f"I'd like to run '{cls.name}' with these parameters: {args}"
+
     def get_info(self) -> PluginInfo:
         return PluginInfo(
             name=self.name,

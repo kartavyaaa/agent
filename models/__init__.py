@@ -8,6 +8,7 @@ regardless of which model a caller imported first.
 from __future__ import annotations
 
 from models.base import Base
+from models.content_plan import ContentPlan
 from models.memory import Memory
 from models.pending_action import PendingAction
 from models.plugin_registry import PluginRegistry
@@ -19,6 +20,7 @@ from models.user import User
 
 __all__ = [
     "Base",
+    "ContentPlan",
     "Memory",
     "PendingAction",
     "PluginRegistry",

@@ -2,6 +2,44 @@
 
 ---
 
+## 2026-07-22 — Slice 5A: Multi-item scheduled content plan
+
+### What was built
+
+- **`models/content_plan.py`**: New `ContentPlan` model (id, user_id, status, timestamps). `status='approved'` only in 5A — no pre-approval DB row.
+- **`models/scheduled_post.py`**: Extended with `post_type` (VARCHAR 'single'|'carousel', NOT NULL DEFAULT 'single'), `image_urls` (JSONB nullable), `plan_id` (FK → content_plans SET NULL nullable). `image_url` made nullable (carousel rows have NULL there).
+- **`alembic/versions/0005_content_plan.py`**: Migration safe on populated tables — `post_type` gets server default 'single' at ALTER time, `image_urls`/`plan_id` are nullable. `image_url` NOT NULL dropped. Order: create content_plans first (FK target), then ADD COLUMNs.
+- **`plugins/build_content_plan/`**: New plugin package — `plugin.py`, `schemas.py`, `list.py`, `cancel.py`.
+  - `BuildContentPlanPlugin`: `requires_approval=True`, `needs_hosted_images=True`. LLM schema uses `image_indices` (NOT URLs — trusted context invariant maintained). `execute()` bulk-creates `ContentPlan` + N `ScheduledPost` rows. Single-item → `post_type='single'` + `image_url`; multi-item → `post_type='carousel'` + `image_urls`.
+  - `build_preview(cls, args)` classmethod produces a human-readable plan summary (item count, Single/Carousel label, caption preview, human-formatted time). Includes "Each post will ask for final confirmation when it's time" so the user knows this is scheduling, not silent auto-posting.
+  - `ListContentPlansPlugin` / `CancelContentPlanPlugin`: mirror the `list_scheduled_posts` / `cancel_scheduled_post` pattern. Cancel only touches `status='scheduled'` rows (triggered posts have their own Cancel button).
+- **`plugins/base.py`**: Added `build_preview(cls, args) -> str` classmethod with a sensible default. Plugins override for richer preview text.
+- **`core/planner/react.py`**: Updated approval-sentinel branch to call `plugin.build_preview(out["args"])` instead of hardcoding the raw args dump. Falls back gracefully if `get_plugin` returns None.
+- **`core/scheduler/jobs.py`**: Worker Phase 2 now branches on `post.post_type`: carousel → `action_type='instagram_carousel'`, payload `{caption, image_urls}`, notify with `image_urls[0]`; single → existing path unchanged. Asserts added for mypy narrowing of nullable columns.
+- **`core/engine.py`**: System prompt updated from 3-way to 4-way routing: multi-photo + scheduling intent → `build_content_plan`; multi-photo + post now → `instagram_carousel`; multi-photo + text plan only → text; single photo → existing paths.
+- **`clients/wiring.py`**: `BuildContentPlanPlugin`, `ListContentPlansPlugin`, `CancelContentPlanPlugin` registered inside the `if s.instagram_access_token` guard.
+- **Tests**: `test_build_content_plan.py` (ClassVar contract, `build_preview` correctness, happy-path post creation, UTC localization, all validation error paths), `test_poll_scheduled_posts_carousel.py` (carousel action_type/payload, first-image notify URL, status→triggered, single regression), `test_cancel_content_plan.py` (cancel pattern, triggered-post untouched, not-found paths).
+
+### Key design decisions
+
+**Post-approval persistence.** `ContentPlan` row only created inside `execute()` after Confirm tap — not before. The proposal lives as JSONB in `pending_actions`. Clean: no orphaned plan rows if the user cancels.
+
+**Index-based grouping.** LLM supplies `image_indices: list[int]` per item, never raw URLs. The engine injects a flat `image_urls` list (same as Slice 3). Plugin resolves `indices → actual_urls` in `execute()`. This keeps the trusted-context invariant from Slices 2/3 intact.
+
+**`build_preview` hook.** Added to `PluginBase` as a concrete classmethod (not abstract) — existing plugins need zero changes. The planner calls it synchronously; no new I/O, no latency cost. For `build_content_plan`, it formats the plan as readable text with human-readable times (cross-platform strftime — `%-d`/`%-I` are Linux-only, replaced with explicit string construction).
+
+**Carousel fire path is zero-change.** The existing `instagram_carousel` plugin, registry `_INJECTED_CONTEXT_KEYS`, and `handle_callback` path all work unchanged for scheduled carousels. The worker just builds `action_type='instagram_carousel'` + `{caption, image_urls}` instead of the single-post payload.
+
+**Migration 0005 safe on populated data.** Tested pattern: `post_type NOT NULL DEFAULT 'single'` backfills via server default at `ALTER TABLE` time in Postgres. `image_url` going nullable leaves existing values intact. `pyproject.toml` `[[tool.mypy.overrides]]` updated to include `0005_content_plan`.
+
+**Cancel scope in 5A.** Both `list_content_plans` and `cancel_content_plan` included — without them, there's no way to cancel all N posts as a unit, making the plan_id FK useless.
+
+### Deferred
+- 5B: Plan editing (change caption/time per item before approval), richer approval preview (show photos inline), per-item cancel from the list view.
+- Per-user timezone (currently global `Settings.default_timezone` only).
+
+---
+
 ## 2026-07-22 — Slice 3: Immediate Instagram carousel posting
 
 ### What was built

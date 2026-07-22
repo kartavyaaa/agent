@@ -97,11 +97,27 @@ async def poll_scheduled_posts(ctx: dict[str, Any]) -> None:
                 continue  # retry next minute
 
             action_id = uuid.uuid4()
+            if post.post_type == "carousel":
+                action_type = "instagram_carousel"
+                action_payload: dict[str, object] = {
+                    "caption": post.caption,
+                    "image_urls": post.image_urls,
+                }
+                assert post.image_urls, "carousel post must have image_urls"
+                photo_url = post.image_urls[0]
+                notify_caption = f"Scheduled carousel ready:\n\n{post.caption}"
+            else:
+                action_type = "instagram_post"
+                assert post.image_url, "single post must have image_url"
+                action_payload = {"caption": post.caption, "image_url": post.image_url}
+                photo_url = post.image_url
+                notify_caption = f"Scheduled post ready:\n\n{post.caption}"
+
             pending = PendingAction(
                 id=action_id,
                 user_id=post.user_id,
-                action_type="instagram_post",
-                action_payload={"caption": post.caption, "image_url": post.image_url},
+                action_type=action_type,
+                action_payload=action_payload,
                 status="pending",
                 preview_text=f"Post to Instagram: {post.caption[:80]}",
                 expires_at=now + timedelta(minutes=settings.approval_ttl_minutes),
@@ -115,8 +131,8 @@ async def poll_scheduled_posts(ctx: dict[str, Any]) -> None:
             try:
                 await notifier.send_photo(
                     user.telegram_id,
-                    photo_url=post.image_url,
-                    caption=f"Scheduled post ready:\n\n{post.caption}",
+                    photo_url=photo_url,
+                    caption=notify_caption,
                     reply_markup=_approval_keyboard_dict(action_id),
                 )
             except Exception:
