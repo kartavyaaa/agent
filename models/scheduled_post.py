@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Index, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
@@ -31,7 +32,7 @@ class ScheduledPost(Base):
     )
     image_url: Mapped[str] = mapped_column(Text, nullable=False)
     caption: Mapped[str] = mapped_column(Text, nullable=False)
-    scheduled_for: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(
         ScheduledPostStatusEnum, server_default="scheduled", nullable=False
     )
@@ -40,10 +41,10 @@ class ScheduledPost(Base):
         ForeignKey("pending_actions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    updated_at: Mapped[DateTime] = mapped_column(
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),

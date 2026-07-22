@@ -30,6 +30,8 @@ from plugins.instagram_post.plugin import InstagramPostPlugin
 from plugins.reminders.cancel import CancelReminderPlugin
 from plugins.reminders.list import ListRemindersPlugin
 from plugins.reminders.plugin import RemindersPlugin
+from plugins.schedule_post.cancel import CancelScheduledPostPlugin
+from plugins.schedule_post.list import ListScheduledPostsPlugin
 from plugins.schedule_post.plugin import SchedulePostPlugin
 from plugins.tasks.complete import CompleteTaskPlugin
 from plugins.tasks.create import CreateTaskPlugin
@@ -71,6 +73,8 @@ async def build_engine(
     registry.register(RemindersPlugin(tz_name=s.default_timezone))
     registry.register(ListRemindersPlugin(tz_name=s.default_timezone))
     registry.register(CancelReminderPlugin())
+    registry.register(ListScheduledPostsPlugin(tz_name=s.default_timezone))
+    registry.register(CancelScheduledPostPlugin())
     registry.register(CreateTaskPlugin(tz_name=s.default_timezone))
     registry.register(ListTasksPlugin())
     registry.register(CompleteTaskPlugin())
