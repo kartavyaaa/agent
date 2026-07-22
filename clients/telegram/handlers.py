@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -355,20 +356,20 @@ async def handle_callback(
             await db.flush()
             await db.commit()
 
+            feedback: str = "✅ Done."
             try:
-                await registry.execute(
+                result = await registry.execute(
                     row.action_type,
                     row.action_payload,
                     user_id=user_id,
                     db=db,
                     _approved=True,
                 )
+                feedback = result.get("confirmation", "✅ Done.")
                 row.status = "confirmed"
                 await db.flush()
                 await db.commit()
                 await callback.answer("Done!")
-                if isinstance(callback.message, Message):
-                    await _edit_message_feedback(callback.message, "✅ Posted to Instagram.")
             except PlatformError as exc:
                 row.status = "failed"
                 await db.flush()
@@ -378,19 +379,21 @@ async def handle_callback(
                     action_type=row.action_type,
                     exc_type=type(exc).__name__,
                 )
-                msg = user_message(exc)
+                feedback = f"❌ {user_message(exc)}"
                 await callback.answer("Failed.")
-                if isinstance(callback.message, Message):
-                    await _edit_message_feedback(callback.message, f"❌ {msg}")
             except Exception:
                 row.status = "failed"
                 await db.flush()
                 await db.commit()
                 log.exception("callback.execute_unexpected_error", action_type=row.action_type)
+                feedback = "❌ Execution failed."
                 await callback.answer("Failed.")
-                if isinstance(callback.message, Message):
-                    await _edit_message_feedback(callback.message, "❌ Execution failed.")
+            if isinstance(callback.message, Message):
+                await _edit_message_feedback(callback.message, feedback)
 
         except Exception:
             log.exception("callback.unexpected_error")
             await callback.answer("Something went wrong.")
+            if isinstance(callback.message, Message):
+                with contextlib.suppress(Exception):
+                    await _edit_message_feedback(callback.message, "❌ Something went wrong.")

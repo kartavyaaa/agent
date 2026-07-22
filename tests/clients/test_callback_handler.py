@@ -80,7 +80,9 @@ def _make_registry(*, raises: Exception | None = None) -> MagicMock:
     if raises:
         reg.execute = AsyncMock(side_effect=raises)
     else:
-        reg.execute = AsyncMock(return_value={"result": "ok", "confirmation": "done"})
+        reg.execute = AsyncMock(
+            return_value={"result": "ok", "confirmation": "✅ Posted to Instagram."}
+        )
     return reg
 
 
@@ -479,3 +481,64 @@ async def test_text_message_confirm_still_uses_edit_text() -> None:
     assert row.status == "confirmed"
     cb.message.edit_text.assert_called_once()
     cb.message.edit_caption.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_confirm_uses_plugin_confirmation_text() -> None:
+    """Plugin-returned confirmation string (e.g. carousel) is shown, not a hardcoded string."""
+    row = _make_pending_row(
+        user_id=UID,
+        action_type="instagram_carousel",
+        action_payload={"caption": "hi", "image_urls": ["https://r2.example.com/a.jpg"]},
+    )
+    cb = _make_callback(data=f"ok:{uuid.uuid4()}", photo_message=False)
+    db = _make_db(row=row)
+    reg = MagicMock()
+    reg.execute = AsyncMock(
+        return_value={
+            "media_id": "c-123",
+            "confirmation": "✅ Posted carousel to Instagram (media id: c-123)",
+        }
+    )
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=reg,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "confirmed"
+    edit_text_kwargs = cb.message.edit_text.call_args
+    shown_text = (
+        edit_text_kwargs[0][0] if edit_text_kwargs[0] else edit_text_kwargs.kwargs.get("text", "")
+    )
+    assert "carousel" in shown_text.lower()
+    assert "✅" in shown_text
+
+
+@pytest.mark.asyncio
+async def test_feedback_edit_called_even_when_execution_raises() -> None:
+    """_edit_message_feedback must clear buttons even if execute() raises unexpectedly."""
+    row = _make_pending_row(user_id=UID)
+    cb = _make_callback(data=f"ok:{uuid.uuid4()}", photo_message=False)
+    db = _make_db(row=row)
+    registry = _make_registry(raises=RuntimeError("unexpected"))
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=registry,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "failed"
+    # edit_text must have been called to clear the buttons regardless of execute() failure
+    cb.message.edit_text.assert_called_once()
+    edit_text_kwargs = cb.message.edit_text.call_args
+    shown_text = (
+        edit_text_kwargs[0][0] if edit_text_kwargs[0] else edit_text_kwargs.kwargs.get("text", "")
+    )
+    assert "❌" in shown_text
