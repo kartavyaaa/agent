@@ -101,19 +101,32 @@ async def test_execute_message_and_confirmation_are_distinct() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_naive_datetime_gets_utc() -> None:
-    """A naive datetime from the LLM must be treated as UTC."""
-    plugin = RemindersPlugin(tz_name="UTC")
+async def test_execute_naive_datetime_localized_via_tz_name() -> None:
+    """Naive datetime is localized using tz_name, not stamped as UTC.
+
+    IST is UTC+5:30. 05:15 local IST = 23:45 UTC the PREVIOUS calendar day.
+    This is the date-rollback case: "remind me at 5:15am" in IST must not
+    land a day late in the DB.
+    """
+    plugin = RemindersPlugin(tz_name="Asia/Kolkata")
     db = _make_db()
-    naive_dt = datetime(2026, 7, 8, 9, 0)  # no tzinfo
+    # LLM emits naive local time: user said "5:15am July 22 IST"
+    naive_ist = datetime(2026, 7, 22, 5, 15)
 
     result = await plugin.execute(
-        ReminderInput(message="test", remind_at=naive_dt),
+        ReminderInput(message="early call", remind_at=naive_ist),
         user_id=uuid.uuid4(),
         db=db,
     )
 
-    assert result.remind_at.tzinfo is not None
+    stored = result.remind_at
+    assert stored.tzinfo is not None
+    # 05:15 IST = 23:45 UTC on July 21 (date rolls back a day)
+    assert stored.year == 2026
+    assert stored.month == 7
+    assert stored.day == 21
+    assert stored.hour == 23
+    assert stored.minute == 45
 
 
 @pytest.mark.asyncio

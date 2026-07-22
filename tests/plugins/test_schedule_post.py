@@ -76,25 +76,58 @@ async def test_execute_creates_scheduled_post_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_coerces_naive_datetime_to_utc() -> None:
-    plugin = SchedulePostPlugin()
+async def test_execute_localizes_naive_datetime_via_tz_name() -> None:
+    """Naive local datetime must be localized using tz_name, NOT stamped as UTC.
+
+    IST is UTC+5:30. 05:15 local IST = 23:45 UTC the PREVIOUS calendar day.
+    This is the exact date-rollback case that caused the prod scheduling bug.
+    """
+    plugin = SchedulePostPlugin(tz_name="Asia/Kolkata")
     db = _make_db()
 
-    # Naive datetime (no tzinfo) should be treated as UTC
-    naive_dt = datetime(2026, 7, 21, 15, 30)
-    assert naive_dt.tzinfo is None
+    # LLM emits: user said "5:15am" on July 22 IST → naive local 2026-07-22T05:15:00
+    local_ist = datetime(2026, 7, 22, 5, 15)
+    assert local_ist.tzinfo is None
 
     await plugin.execute(
-        SchedulePostInput(caption="Test caption", scheduled_for=naive_dt),
+        SchedulePostInput(caption="Test caption", scheduled_for=local_ist),
         user_id=uuid.uuid4(),
         db=db,
         image_url="https://cdn.example.com/photo.jpg",
     )
 
-    # The row added to DB should have a tz-aware scheduled_for
     added_row = db.add.call_args[0][0]
-    assert added_row.scheduled_for.tzinfo is not None
-    assert added_row.scheduled_for.tzinfo == UTC
+    stored = added_row.scheduled_for
+    assert stored.tzinfo is not None
+    # 05:15 IST = 23:45 UTC on July 21 (date rolls back a day)
+    assert stored.year == 2026
+    assert stored.month == 7
+    assert stored.day == 21
+    assert stored.hour == 23
+    assert stored.minute == 45
+
+
+@pytest.mark.asyncio
+async def test_execute_ist_no_date_rollback_for_afternoon() -> None:
+    """14:00 IST = 08:30 UTC same day — no rollback."""
+    plugin = SchedulePostPlugin(tz_name="Asia/Kolkata")
+    db = _make_db()
+
+    local_ist = datetime(2026, 7, 22, 14, 0)  # 2pm IST July 22
+
+    await plugin.execute(
+        SchedulePostInput(caption="Afternoon post", scheduled_for=local_ist),
+        user_id=uuid.uuid4(),
+        db=db,
+        image_url="https://cdn.example.com/photo.jpg",
+    )
+
+    added_row = db.add.call_args[0][0]
+    stored = added_row.scheduled_for
+    # 14:00 IST = 08:30 UTC same day
+    assert stored.day == 22
+    assert stored.hour == 8
+    assert stored.minute == 30
 
 
 @pytest.mark.asyncio

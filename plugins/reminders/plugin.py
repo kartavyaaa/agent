@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.timeutil import format_local
+from core.timeutil import format_local, localize_to_utc
 from models.reminder import Reminder
 from plugins.base import HealthStatus, PluginBase
 from plugins.reminders.schemas import ReminderConfig, ReminderInput, ReminderOutput
@@ -19,7 +19,10 @@ class RemindersPlugin(PluginBase):
     description = (
         "Create a reminder that will be delivered at a specified future time. "
         "Use the current local time from the system prompt to resolve relative expressions "
-        "like 'tomorrow' or 'in 2 hours', then emit remind_at as an absolute UTC datetime."
+        "like 'tomorrow' or 'in 2 hours'. "
+        "Emit remind_at as the user's LOCAL wall-clock time with NO timezone suffix "
+        "(e.g. '5pm' in Asia/Kolkata → 2026-07-14T17:00:00, no Z, no +05:30). "
+        "The system converts it to UTC."
     )
     capabilities: ClassVar[list[str]] = ["reminders"]
     permissions: ClassVar[list[str]] = ["db:write"]
@@ -40,11 +43,7 @@ class RemindersPlugin(PluginBase):
         **kwargs: Any,
     ) -> ReminderOutput:
         assert isinstance(input, ReminderInput)
-        remind_at = (
-            input.remind_at.replace(tzinfo=UTC)
-            if input.remind_at.tzinfo is None
-            else input.remind_at
-        )
+        remind_at = localize_to_utc(input.remind_at, self._tz_name)
         reminder = Reminder(
             id=uuid.uuid4(),
             user_id=user_id,

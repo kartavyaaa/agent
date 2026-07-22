@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.exceptions import PluginError
-from core.timeutil import format_local
+from core.timeutil import format_local, localize_to_utc
 from models.scheduled_post import ScheduledPost
 from plugins.base import HealthStatus, PluginBase
 from plugins.schedule_post.schemas import SchedulePostConfig, SchedulePostInput, SchedulePostOutput
@@ -32,8 +32,9 @@ class SchedulePostPlugin(PluginBase):
         "Schedule a photo for posting to Instagram at a future time. "
         "Use when the user says 'post this at <time>' or 'schedule this for <time>'. "
         "Only call on a turn where the user has actually sent a photo. "
-        "Emit scheduled_for as an absolute UTC ISO datetime "
-        "(e.g. 2026-07-21T15:30:00Z). "
+        "Emit scheduled_for as the user's LOCAL wall-clock time with NO timezone suffix "
+        "(e.g. '5:15am' in Asia/Kolkata → 2026-07-22T05:15:00, no Z, no +05:30). "
+        "The system converts it to UTC. "
         "Do NOT call this if the user wants to post immediately — use instagram_post instead."
     )
     capabilities: ClassVar[list[str]] = ["schedule_post"]
@@ -63,12 +64,7 @@ class SchedulePostPlugin(PluginBase):
                 "schedule_post requires image_url but it was not injected — "
                 "the engine must upload the image to R2 before scheduling."
             )
-        # Coerce naive datetime to UTC (same pattern as reminders plugin:43-47).
-        scheduled_for = (
-            input.scheduled_for.replace(tzinfo=UTC)
-            if input.scheduled_for.tzinfo is None
-            else input.scheduled_for
-        )
+        scheduled_for = localize_to_utc(input.scheduled_for, self._tz_name)
         row = ScheduledPost(
             id=uuid.uuid4(),
             user_id=user_id,
