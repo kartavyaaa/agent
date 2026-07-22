@@ -46,6 +46,22 @@ _media_group_buffer: dict[str, list[Message]] = {}
 _media_group_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
 
 
+async def _edit_message_feedback(
+    message: Message,
+    text: str,
+) -> None:
+    """Edit an approval message to show final feedback, removing the inline keyboard.
+
+    Worker-sent proposals arrive as photo messages (sent via sendPhoto).
+    Telegram's Bot API does not allow editMessageText on a photo message — you
+    must use editMessageCaption instead. Detect by checking message.photo.
+    """
+    if message.photo:
+        await message.edit_caption(caption=text, reply_markup=None)
+    else:
+        await message.edit_text(text, reply_markup=None)
+
+
 def _make_approval_keyboard(pending_action_id: uuid.UUID) -> InlineKeyboardMarkup:
     pid = str(pending_action_id)
     # "ok:{uuid}" = 39 bytes, "no:{uuid}" = 39 bytes — both within Telegram's 64-byte limit.
@@ -319,7 +335,7 @@ async def handle_callback(
                 await db.commit()
                 await callback.answer("This action has expired.")
                 if isinstance(callback.message, Message):
-                    await callback.message.edit_text("⏰ Action expired.", reply_markup=None)
+                    await _edit_message_feedback(callback.message, "⏰ Action expired.")
                 return
 
             if choice == "no":
@@ -328,7 +344,7 @@ async def handle_callback(
                 await db.commit()
                 await callback.answer("Cancelled.")
                 if isinstance(callback.message, Message):
-                    await callback.message.edit_text("❌ Cancelled.", reply_markup=None)
+                    await _edit_message_feedback(callback.message, "❌ Cancelled.")
                 return
 
             # choice == "ok"
@@ -352,7 +368,7 @@ async def handle_callback(
                 await db.commit()
                 await callback.answer("Done!")
                 if isinstance(callback.message, Message):
-                    await callback.message.edit_text("✅ Done.", reply_markup=None)
+                    await _edit_message_feedback(callback.message, "✅ Posted to Instagram.")
             except PlatformError as exc:
                 row.status = "failed"
                 await db.flush()
@@ -365,7 +381,7 @@ async def handle_callback(
                 msg = user_message(exc)
                 await callback.answer("Failed.")
                 if isinstance(callback.message, Message):
-                    await callback.message.edit_text(f"❌ {msg}", reply_markup=None)
+                    await _edit_message_feedback(callback.message, f"❌ {msg}")
             except Exception:
                 row.status = "failed"
                 await db.flush()
@@ -373,7 +389,7 @@ async def handle_callback(
                 log.exception("callback.execute_unexpected_error", action_type=row.action_type)
                 await callback.answer("Failed.")
                 if isinstance(callback.message, Message):
-                    await callback.message.edit_text("❌ Execution failed.", reply_markup=None)
+                    await _edit_message_feedback(callback.message, "❌ Execution failed.")
 
         except Exception:
             log.exception("callback.unexpected_error")

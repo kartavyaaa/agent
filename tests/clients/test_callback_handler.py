@@ -19,6 +19,7 @@ from clients.telegram.handlers import handle_callback
 def _make_callback(
     data: str = "",
     from_user_id: int = 12345,
+    photo_message: bool = False,
 ) -> MagicMock:
     cb = MagicMock()
     cb.data = data
@@ -28,7 +29,10 @@ def _make_callback(
     # Use spec=Message so isinstance(callback.message, Message) returns True in the handler.
     msg = MagicMock(spec=Message)
     msg.edit_text = AsyncMock()
+    msg.edit_caption = AsyncMock()
     msg.edit_reply_markup = AsyncMock()
+    # photo=None → text message path; truthy photo → worker-sent photo message path.
+    msg.photo = [MagicMock()] if photo_message else None
     cb.message = msg
     return cb
 
@@ -369,3 +373,109 @@ async def test_execution_failure_sets_failed_status() -> None:
     assert row.status == "failed"
     cb.answer.assert_called()
     assert "failed" in cb.answer.call_args[0][0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Photo-message feedback (_edit_message_feedback) — worker-sent proposals
+# ---------------------------------------------------------------------------
+# Worker sends proposals as photo messages (sendPhoto). Telegram forbids
+# editMessageText on photo messages — must use editMessageCaption instead.
+# These tests confirm the correct edit method is called for each outcome.
+
+
+@pytest.mark.asyncio
+async def test_photo_message_confirm_uses_edit_caption() -> None:
+    """Worker-sent photo proposal: Confirm must call edit_caption, not edit_text."""
+    row = _make_pending_row(user_id=UID)
+    cb = _make_callback(data=f"ok:{uuid.uuid4()}", photo_message=True)
+    db = _make_db(row=row)
+    registry = _make_registry()
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=registry,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "confirmed"
+    cb.message.edit_caption.assert_called_once()
+    cb.message.edit_text.assert_not_called()
+    caption_text = cb.message.edit_caption.call_args.kwargs.get(
+        "caption"
+    ) or cb.message.edit_caption.call_args[1].get("caption", "")
+    assert "✅" in caption_text
+
+
+@pytest.mark.asyncio
+async def test_photo_message_cancel_uses_edit_caption() -> None:
+    """Worker-sent photo proposal: Cancel must call edit_caption, not edit_text."""
+    row = _make_pending_row(user_id=UID)
+    cb = _make_callback(data=f"no:{uuid.uuid4()}", photo_message=True)
+    db = _make_db(row=row)
+    registry = _make_registry()
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=registry,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "cancelled"
+    cb.message.edit_caption.assert_called_once()
+    cb.message.edit_text.assert_not_called()
+    caption_text = cb.message.edit_caption.call_args.kwargs.get(
+        "caption"
+    ) or cb.message.edit_caption.call_args[1].get("caption", "")
+    assert "❌" in caption_text
+
+
+@pytest.mark.asyncio
+async def test_photo_message_failure_uses_edit_caption() -> None:
+    """Worker-sent photo proposal: execution failure must call edit_caption."""
+    from core.exceptions import PluginError
+
+    row = _make_pending_row(user_id=UID)
+    cb = _make_callback(data=f"ok:{uuid.uuid4()}", photo_message=True)
+    db = _make_db(row=row)
+    registry = _make_registry(raises=PluginError("IG error"))
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=registry,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "failed"
+    cb.message.edit_caption.assert_called_once()
+    cb.message.edit_text.assert_not_called()
+    caption_text = cb.message.edit_caption.call_args.kwargs.get(
+        "caption"
+    ) or cb.message.edit_caption.call_args[1].get("caption", "")
+    assert "❌" in caption_text
+
+
+@pytest.mark.asyncio
+async def test_text_message_confirm_still_uses_edit_text() -> None:
+    """In-conversation text proposals must still use edit_text (regression guard)."""
+    row = _make_pending_row(user_id=UID)
+    cb = _make_callback(data=f"ok:{uuid.uuid4()}", photo_message=False)
+    db = _make_db(row=row)
+    registry = _make_registry()
+
+    with patch(_PATCH_USER, new=AsyncMock(return_value=UID)):
+        await handle_callback(
+            cb,
+            session_factory=_make_session_factory(db),
+            registry=registry,
+            allowed_user_ids=ALLOWED,
+        )
+
+    assert row.status == "confirmed"
+    cb.message.edit_text.assert_called_once()
+    cb.message.edit_caption.assert_not_called()
