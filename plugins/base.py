@@ -44,6 +44,7 @@ class PluginBase(ABC):
     config_schema: ClassVar[type[BaseModel]]
     requires_approval: ClassVar[bool] = False
     needs_hosted_image: ClassVar[bool] = False
+    needs_hosted_images: ClassVar[bool] = False
 
     def get_info(self) -> PluginInfo:
         return PluginInfo(

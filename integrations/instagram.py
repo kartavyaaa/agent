@@ -162,6 +162,61 @@ class InstagramClient:
         self._check_response(resp2, step="media_publish")
         return str(resp2.json()["id"])
 
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    async def publish_carousel(self, image_urls: list[str], caption: str) -> str:
+        """Publish a carousel of photos to Instagram. Returns the published media id.
+
+        Flow: create N child containers (each polled to FINISHED) → create parent CAROUSEL
+        container (polled to FINISHED) → publish. Caption goes on the parent container.
+        Partial failure: if a child or parent errors, dangling child containers expire on
+        IG's side — no cleanup is attempted; the IntegrationError propagates to the caller.
+        """
+        child_ids: list[str] = []
+        for image_url in image_urls:
+            resp = await self._client.post(
+                f"{_IG_BASE}/{self._ig_user_id}/media",
+                params={
+                    "image_url": image_url,
+                    "is_carousel_item": "true",
+                    "access_token": self._access_token,
+                },
+                timeout=self._timeout,
+            )
+            self._check_response(resp, step="carousel_child")
+            child_id: str = resp.json()["id"]
+            await self._wait_until_ready(child_id)
+            child_ids.append(child_id)
+
+        resp_parent = await self._client.post(
+            f"{_IG_BASE}/{self._ig_user_id}/media",
+            params={
+                "media_type": "CAROUSEL",
+                "children": ",".join(child_ids),
+                "caption": caption,
+                "access_token": self._access_token,
+            },
+            timeout=self._timeout,
+        )
+        self._check_response(resp_parent, step="carousel_parent")
+        parent_id: str = resp_parent.json()["id"]
+        await self._wait_until_ready(parent_id)
+
+        resp_publish = await self._client.post(
+            f"{_IG_BASE}/{self._ig_user_id}/media_publish",
+            params={
+                "creation_id": parent_id,
+                "access_token": self._access_token,
+            },
+            timeout=self._timeout,
+        )
+        self._check_response(resp_publish, step="carousel_publish")
+        return str(resp_publish.json()["id"])
+
     async def health_check(self) -> bool:
         return bool(self._access_token and self._ig_user_id)
 

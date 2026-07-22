@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+import uuid
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.tools.registry import ToolRegistry
+from core.tools.registry import _INJECTED_CONTEXT_KEYS, ToolRegistry
+from plugins.base import HealthStatus, PluginBase
 from plugins.file_reader.plugin import FileReaderPlugin
 from plugins.reminders.plugin import RemindersPlugin
 from plugins.web_search.plugin import WebSearchPlugin
@@ -105,3 +109,189 @@ def test_get_tools_for_llm_returns_one_tool_per_plugin() -> None:
     tools = registry.get_tools_for_llm()
     names = {t.name for t in tools}
     assert names == {"create_reminder", "web_search"}
+
+
+# ---------------------------------------------------------------------------
+# _INJECTED_CONTEXT_KEYS — image_urls (plural) support
+# ---------------------------------------------------------------------------
+
+
+def test_image_urls_in_injected_context_keys() -> None:
+    assert "image_urls" in _INJECTED_CONTEXT_KEYS
+
+
+def test_image_url_still_in_injected_context_keys() -> None:
+    assert "image_url" in _INJECTED_CONTEXT_KEYS
+
+
+# ---------------------------------------------------------------------------
+# execute() injection of image_urls list
+# ---------------------------------------------------------------------------
+
+
+class _UrlsInput(BaseModel):
+    caption: str
+
+
+class _UrlsOutput(BaseModel):
+    result: str
+    confirmation: str = "ok"
+
+
+class _UrlsConfig(BaseModel):
+    pass
+
+
+class _PluginWithImageUrls(PluginBase):
+    """Plugin that declares image_urls: list[str] in execute() — should receive the injected list."""
+
+    name: ClassVar[str] = "plugin_with_image_urls"
+    version: ClassVar[str] = "1.0.0"
+    description: ClassVar[str] = "test"
+    capabilities: ClassVar[list[str]] = []
+    permissions: ClassVar[list[str]] = []
+    dependencies: ClassVar[list[str]] = []
+    input_schema = _UrlsInput
+    output_schema = _UrlsOutput
+    config_schema = _UrlsConfig
+
+    received_image_urls: list[str] | None = None
+
+    async def execute(
+        self,
+        input: BaseModel,  # noqa: A002
+        *,
+        user_id: uuid.UUID,
+        db: AsyncSession,
+        image_urls: list[str] | None = None,
+        **kwargs: Any,
+    ) -> _UrlsOutput:
+        assert isinstance(input, _UrlsInput)
+        _PluginWithImageUrls.received_image_urls = image_urls
+        return _UrlsOutput(result="done")
+
+    async def health_check(self) -> HealthStatus:
+        from datetime import UTC, datetime
+
+        return HealthStatus(status="healthy", message="ok", checked_at=datetime.now(UTC))
+
+
+class _PluginWithoutImageUrls(PluginBase):
+    """Plugin that does NOT declare image_urls — should not receive it."""
+
+    name: ClassVar[str] = "plugin_without_image_urls"
+    version: ClassVar[str] = "1.0.0"
+    description: ClassVar[str] = "test"
+    capabilities: ClassVar[list[str]] = []
+    permissions: ClassVar[list[str]] = []
+    dependencies: ClassVar[list[str]] = []
+    input_schema = _UrlsInput
+    output_schema = _UrlsOutput
+    config_schema = _UrlsConfig
+
+    received_kwargs: dict[str, Any] = {}
+
+    async def execute(
+        self,
+        input: BaseModel,  # noqa: A002
+        *,
+        user_id: uuid.UUID,
+        db: AsyncSession,
+        **kwargs: Any,
+    ) -> _UrlsOutput:
+        assert isinstance(input, _UrlsInput)
+        _PluginWithoutImageUrls.received_kwargs = dict(kwargs)
+        return _UrlsOutput(result="done")
+
+    async def health_check(self) -> HealthStatus:
+        from datetime import UTC, datetime
+
+        return HealthStatus(status="healthy", message="ok", checked_at=datetime.now(UTC))
+
+
+@pytest.mark.asyncio
+async def test_image_urls_stripped_from_llm_args_and_forwarded_to_execute() -> None:
+    registry = ToolRegistry()
+    registry.register(_PluginWithImageUrls())
+    _PluginWithImageUrls.received_image_urls = None
+
+    urls = ["https://r2.example.com/a.jpg", "https://r2.example.com/b.jpg"]
+    raw_args = {"caption": "hello", "image_urls": urls}
+
+    await registry.execute(
+        "plugin_with_image_urls",
+        raw_args,
+        user_id=uuid.uuid4(),
+        db=MagicMock(),
+        _approved=True,
+    )
+
+    assert _PluginWithImageUrls.received_image_urls == urls
+
+
+@pytest.mark.asyncio
+async def test_image_urls_not_forwarded_to_plugin_without_param() -> None:
+    registry = ToolRegistry()
+    registry.register(_PluginWithoutImageUrls())
+    _PluginWithoutImageUrls.received_kwargs = {}
+
+    urls = ["https://r2.example.com/a.jpg"]
+    raw_args = {"caption": "hello", "image_urls": urls}
+
+    await registry.execute(
+        "plugin_without_image_urls",
+        raw_args,
+        user_id=uuid.uuid4(),
+        db=MagicMock(),
+        _approved=True,
+    )
+
+    assert "image_urls" not in _PluginWithoutImageUrls.received_kwargs
+
+
+@pytest.mark.asyncio
+async def test_image_url_singular_still_forwarded() -> None:
+    """Regression: singular image_url injection still works after adding image_urls."""
+
+    class _SingularPlugin(PluginBase):
+        name: ClassVar[str] = "singular_plugin"
+        version: ClassVar[str] = "1.0.0"
+        description: ClassVar[str] = "test"
+        capabilities: ClassVar[list[str]] = []
+        permissions: ClassVar[list[str]] = []
+        dependencies: ClassVar[list[str]] = []
+        input_schema = _UrlsInput
+        output_schema = _UrlsOutput
+        config_schema = _UrlsConfig
+        received_url: str | None = None
+
+        async def execute(
+            self,
+            input: BaseModel,  # noqa: A002
+            *,
+            user_id: uuid.UUID,
+            db: AsyncSession,
+            image_url: str | None = None,
+            **kwargs: Any,
+        ) -> _UrlsOutput:
+            _SingularPlugin.received_url = image_url
+            return _UrlsOutput(result="done")
+
+        async def health_check(self) -> HealthStatus:
+            from datetime import UTC, datetime
+
+            return HealthStatus(status="healthy", message="ok", checked_at=datetime.now(UTC))
+
+    registry = ToolRegistry()
+    registry.register(_SingularPlugin())
+    _SingularPlugin.received_url = None
+
+    raw_args = {"caption": "hello", "image_url": "https://r2.example.com/x.jpg"}
+    await registry.execute(
+        "singular_plugin",
+        raw_args,
+        user_id=uuid.uuid4(),
+        db=MagicMock(),
+        _approved=True,
+    )
+    assert _SingularPlugin.received_url == "https://r2.example.com/x.jpg"

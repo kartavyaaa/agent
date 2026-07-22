@@ -169,9 +169,9 @@ async def test_trigger_creates_pending_action_and_sets_triggered() -> None:
     assert post.pending_action_id is not None
     pending_rows = [o for o in db.added if hasattr(o, "action_type")]
     assert len(pending_rows) == 1
-    row = pending_rows[0]
-    assert getattr(row, "action_type") == "instagram_post"
-    payload: dict[str, object] = getattr(row, "action_payload")
+    row: SimpleNamespace = pending_rows[0]  # type: ignore[assignment]
+    assert row.action_type == "instagram_post"
+    payload: dict[str, object] = row.action_payload
     assert payload["image_url"] == post.image_url
     assert payload["caption"] == post.caption
 

@@ -2,6 +2,80 @@
 
 ---
 
+## 2026-07-22 — Slice 3: Immediate Instagram carousel posting
+
+### What was built
+
+- `integrations/instagram.py`: `publish_carousel(image_urls, caption)` — creates N child containers
+  (each with `is_carousel_item=true`), polls each child to FINISHED, creates the parent CAROUSEL
+  container with the caption, polls the parent to FINISHED, then publishes. Same `@retry` +
+  `_check_response` + code-190 token-expiry handling as `publish_photo`. No length validation
+  in the integration layer (see below).
+- `plugins/base.py`: `needs_hosted_images: ClassVar[bool] = False` added after `needs_hosted_image`.
+  These two flags are mutually exclusive: `instagram_post` has `needs_hosted_image=True /
+  needs_hosted_images=False`; `instagram_carousel` has `needs_hosted_images=True /
+  needs_hosted_image=False`. The engine uses `if/elif` so only one branch fires.
+- `core/tools/registry.py`: `"image_urls"` added to `_INJECTED_CONTEXT_KEYS`. The existing split
+  loop and `inspect.signature` filter forward the list value to any plugin that declares
+  `image_urls: list[str]` in `execute()`.
+- `core/engine.py`: Extracted a shared `_upload_single_image(b64, mime)` inner helper used by
+  both the singular (`needs_hosted_image`) and plural (`needs_hosted_images`) upload branches —
+  no duplicated upload code. The `elif` carousel branch iterates `request.images`, uploads each
+  to R2, and stores `image_urls: [url, ...]` in `action_payload` (JSONB holds lists natively —
+  no migration needed). System prompt updated with unambiguous 3-way routing: carousel-post /
+  content-plan / single-post.
+- `plugins/instagram_carousel/`: New plugin — `requires_approval=True`, `needs_hosted_images=True`.
+  Length validation (2 ≤ N ≤ 10) lives HERE, not in the integration client (correct layering:
+  `IntegrationError` in the HTTP client, `PluginError` in the plugin).
+- `clients/wiring.py`: `InstagramCarouselPlugin` registered alongside `InstagramPostPlugin` inside
+  the `if s.instagram_access_token and s.instagram_user_id:` guard.
+
+### Key design decisions
+
+**Caption on parent container.** The caption goes in the parent container POST (`media_type=CAROUSEL,
+children, caption`), not on child containers or the publish call. The live DoD test MUST confirm
+the caption appears on the posted carousel (not tested by unit tests).
+
+**Defensive per-container readiness poll.** Every child AND the parent container is polled to
+FINISHED before the next step. The probe showed children FINISHED immediately, but single posts
+also probed clean and then raced in prod ("Media ID is not available"). Lesson learned: poll
+every container, unconditionally.
+
+**`needs_hosted_images` plural flag (not a shared flag).** An explicit separate ClassVar, not a
+unified flag. Clean: the engine's `if needs_hosted_image / elif needs_hosted_images` is
+unambiguous. A plugin must never set both.
+
+**`image_urls` as trusted injected context.** Never in the LLM-facing input schema. Mirrors the
+`image_url` singular pattern: stored in `action_payload` at proposal time, stripped from
+`llm_args` at execute time, forwarded as a kwarg only if declared in the plugin's signature.
+
+**No migration.** `action_payload` is JSONB; `{"caption": "...", "image_urls": [...]}` rounds
+through Postgres unchanged. The approval callback passes the dict as `raw_args` as-is.
+
+### Partial-failure note
+
+If children are created and then the parent-create or publish call errors (e.g., aspect-ratio
+mismatch, token expiry mid-flow), the child containers dangle on IG's side. Instagram expires
+them automatically — no cleanup is needed or built. The `IntegrationError` propagates up through
+the plugin and callback handler, the `pending_action` row ends in `failed`, and the user sees
+the clear error message. The failure path is explicit and visible.
+
+### Unverified: aspect-ratio uniformity
+
+Instagram carousels may require that all images share the same aspect ratio. This was not
+verified in the probe (the probe images were uniform). If IG rejects a mixed-aspect carousel,
+`_check_response` will surface the real error message — no guessing needed. A future slice
+could add a pre-flight aspect check if the error message proves cryptic in practice.
+
+### 3-way system prompt routing
+
+The multi-photo paragraph was replaced with explicit routing:
+- Multiple photos + "post as carousel" → `instagram_carousel`
+- Multiple photos + "content plan" → text plan (Slice 1 behavior, unchanged)
+- Single photo + "post to Instagram" → `instagram_post` (unchanged)
+
+---
+
 ## 2026-07-20 — Part A: Model routing (gpt-5.5 → gpt-5.4) + Part B: Slice 1 multi-image content-plan
 
 ### Part A — Model cost reduction

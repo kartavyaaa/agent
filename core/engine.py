@@ -40,11 +40,17 @@ _SYSTEM_PROMPT = (
     "and scheduled_for as the user's LOCAL time with NO timezone suffix "
     "(e.g. if the user says '5:15am' in Asia/Kolkata, emit 2026-07-22T05:15:00 — no Z, no +05:30); "
     "otherwise provide a thoughtful critique covering composition, lighting, subject, and suggestions. "
-    "When the user sends multiple photos as a batch: produce a structured Instagram content plan "
-    "covering groupings (carousel vs standalone with reasons), a caption and hashtags per group, "
-    "a suggested posting order, and your take on which shots are strongest — presented as a "
-    "suggestion, not a verdict; the human is the final judge on framing and selection. "
-    "Some tools (like instagram_post) require user approval before they run. "
+    "When the user sends multiple photos AND explicitly asks to post them as a carousel or "
+    "multi-image post on Instagram, call instagram_carousel with just the caption — do NOT ask "
+    "for confirmation in text first. The system shows a Confirm/Cancel prompt automatically. "
+    "When the user sends multiple photos and asks for a content PLAN (not a post), produce a "
+    "structured Instagram content plan covering groupings (carousel vs standalone with reasons), "
+    "a caption and hashtags per group, a suggested posting order, and your take on which shots "
+    "are strongest — presented as a suggestion, not a verdict; the human is the final judge on "
+    "framing and selection. "
+    "When the user sends a SINGLE photo and asks to post it to Instagram immediately, use "
+    "instagram_post — not instagram_carousel. "
+    "Some tools (like instagram_post and instagram_carousel) require user approval before they run. "
     "For these, call the tool directly with the required arguments — do NOT ask the user for "
     "confirmation in text first. The system automatically presents a confirmation prompt with "
     "buttons before the action executes. Asking for confirmation yourself is redundant and "
@@ -219,33 +225,48 @@ class CoreEngine:
             pa = plan_result.pending_action
             plugin = self._registry.get_plugin(pa.action_type)
 
-            # If the action needs a hosted image, upload now (bytes are available
-            # in request.image_base64). This happens only in the proposal branch,
-            # so ordinary photo critiques never touch R2.
+            # Upload helper shared by the singular and plural hosted-image branches.
+            async def _upload_single_image(b64: str, mime: str) -> str:
+                img_bytes = base64.b64decode(b64)
+                r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
+                assert self._r2 is not None
+                url = await self._r2.upload(img_bytes, key=r2_key, content_type=mime)
+                log.info("engine.r2_upload", key=r2_key)
+                return url
+
+            # If the action needs a single hosted image, upload now (bytes available in
+            # request.image_base64). Only fires in the proposal branch — ordinary photo
+            # critiques never touch R2.
             if getattr(plugin, "needs_hosted_image", False):
                 if not request.image_base64:
-                    # User requested posting without sending a photo — refuse early
-                    # so no incomplete payload gets stored in pending_actions.
                     return CoreResponse(content="Please send a photo to post to Instagram.")
                 if self._r2 is None:
-                    # Defensive guard: wiring only registers instagram_post when R2
-                    # is configured, so this branch is normally unreachable.
                     return CoreResponse(
                         content="Image hosting is not configured; cannot post to Instagram."
                     )
-                img_bytes = base64.b64decode(request.image_base64)
-                r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
-                r2_url = await self._r2.upload(
-                    img_bytes,
-                    key=r2_key,
-                    content_type=request.image_mime or "image/jpeg",
+                r2_url = await _upload_single_image(
+                    request.image_base64, request.image_mime or "image/jpeg"
                 )
                 pa = PendingActionProposal(
                     action_type=pa.action_type,
                     action_payload={**pa.action_payload, "image_url": r2_url},
                     preview_text=pa.preview_text,
                 )
-                log.info("engine.r2_upload", key=r2_key, action_type=pa.action_type)
+                log.info("engine.r2_upload_proposal", action_type=pa.action_type)
+            elif getattr(plugin, "needs_hosted_images", False):
+                if not request.images:
+                    return CoreResponse(content="Please send photos to post as a carousel.")
+                if self._r2 is None:
+                    return CoreResponse(
+                        content="Image hosting is not configured; cannot post to Instagram."
+                    )
+                urls = [await _upload_single_image(img.data, img.mime) for img in request.images]
+                pa = PendingActionProposal(
+                    action_type=pa.action_type,
+                    action_payload={**pa.action_payload, "image_urls": urls},
+                    preview_text=pa.preview_text,
+                )
+                log.info("engine.r2_upload_carousel", n=len(urls), action_type=pa.action_type)
 
             # Single-pending enforcement: cancel any existing pending action for
             # this user before inserting the new one (avoids partial-unique-index

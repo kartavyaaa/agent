@@ -15,7 +15,7 @@ from plugins.base import PluginBase
 # Keys that the engine injects into action_payload at proposal time (trusted server context).
 # These are never LLM-supplied and must be separated from raw_args before input_schema validation,
 # then forwarded to plugin.execute() only if the plugin's signature declares the parameter.
-_INJECTED_CONTEXT_KEYS: frozenset[str] = frozenset({"image_url"})
+_INJECTED_CONTEXT_KEYS: frozenset[str] = frozenset({"image_url", "image_urls"})
 
 
 def _normalize_for_openai_strict(schema: dict[str, Any]) -> None:
