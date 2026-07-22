@@ -166,18 +166,23 @@ async def test_health_check_healthy() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_confirmation_shows_local_time() -> None:
-    """Confirmation must show local time, not the raw UTC value."""
-    # UTC 09:00 → IST 14:30 (UTC+5:30)
+    """Confirmation must display the stored local time, not a UTC string.
+
+    LLM emits naive local 14:30 IST. Plugin localizes → 09:00 UTC, then
+    format_local converts back to 14:30 IST for the confirmation string.
+    """
     plugin = RemindersPlugin(tz_name="Asia/Kolkata")
     db = _make_db()
-    remind_at = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+    # LLM emits naive local wall-clock: 14:30 IST
+    remind_at_local = datetime(2026, 7, 8, 14, 30)
 
     result = await plugin.execute(
-        ReminderInput(message="call Bob", remind_at=remind_at),
+        ReminderInput(message="call Bob", remind_at=remind_at_local),
         user_id=uuid.uuid4(),
         db=db,
     )
 
     assert "14:30" in result.confirmation
     assert "IST" in result.confirmation
-    assert "09:00" not in result.confirmation
+    # Stored UTC should be 09:00 (14:30 IST - 5:30)
+    assert result.remind_at == datetime(2026, 7, 8, 9, 0, tzinfo=UTC)

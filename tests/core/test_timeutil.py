@@ -68,19 +68,27 @@ def test_localize_naive_ist_afternoon_same_day() -> None:
     assert result == datetime(2026, 7, 22, 8, 30, tzinfo=UTC)
 
 
-def test_localize_already_aware_passes_through() -> None:
-    """An already-UTC-aware datetime is returned as UTC unchanged."""
-    aware = datetime(2026, 7, 22, 8, 30, tzinfo=UTC)
-    result = localize_to_utc(aware, "Asia/Kolkata")
-    assert result == aware
+def test_localize_strips_utc_suffix_and_treats_as_local() -> None:
+    """LLM emits 06:21Z (UTC-aware) for 'post at 6:21am IST' — the prod bug.
+
+    The old behaviour passed the aware datetime through unchanged, storing 06:21 UTC
+    instead of 00:51 UTC. The new behaviour strips the Z and treats the wall-clock
+    digits as IST, producing 00:51 UTC.
+    """
+    # LLM attached a Z even though we said not to
+    llm_output_with_z = datetime(2026, 7, 22, 6, 21, tzinfo=UTC)
+    result = localize_to_utc(llm_output_with_z, "Asia/Kolkata")
+    # 06:21 IST = 00:51 UTC
+    assert result == datetime(2026, 7, 22, 0, 51, tzinfo=UTC)
 
 
-def test_localize_already_aware_non_utc_converted() -> None:
-    """An aware datetime in a non-UTC zone is converted to UTC."""
+def test_localize_strips_non_utc_offset_and_treats_as_local() -> None:
+    """Aware datetime with any tzinfo has tzinfo stripped; wall-clock treated as tz_name."""
     ist_offset = timezone(timedelta(hours=5, minutes=30))
-    aware_ist = datetime(2026, 7, 22, 5, 15, tzinfo=ist_offset)
-    result = localize_to_utc(aware_ist, "UTC")  # tz_name ignored for aware dt
-    assert result == datetime(2026, 7, 21, 23, 45, tzinfo=UTC)
+    # LLM emits 06:21+05:30 — still treat wall-clock 06:21 as IST
+    aware_ist = datetime(2026, 7, 22, 6, 21, tzinfo=ist_offset)
+    result = localize_to_utc(aware_ist, "Asia/Kolkata")
+    assert result == datetime(2026, 7, 22, 0, 51, tzinfo=UTC)
 
 
 def test_localize_invalid_tz_falls_back_to_utc() -> None:

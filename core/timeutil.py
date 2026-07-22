@@ -25,16 +25,18 @@ def format_local(dt_utc: datetime, tz_name: str) -> str:
 
 
 def localize_to_utc(naive_local: datetime, tz_name: str) -> datetime:
-    """Interpret a naive local datetime in tz_name and return the equivalent UTC datetime.
+    """Interpret a wall-clock datetime as local time in tz_name and return UTC.
 
-    The LLM emits the user's wall-clock time (e.g. "2026-07-22T05:15:00", no Z).
-    This function stamps the correct timezone and converts to UTC, handling date
-    rollovers automatically (e.g. 05:15 IST = 23:45 UTC the *previous* calendar day).
+    The LLM is instructed to emit the user's local wall-clock time with no Z
+    (e.g. "2026-07-22T06:21:00"), but it sometimes attaches a Z or +00:00 offset
+    anyway. Any tzinfo is stripped before localizing — the wall-clock digits are
+    always treated as local time in tz_name regardless of what the LLM attached.
 
-    If naive_local is already tz-aware, it is converted to UTC directly.
-    Invalid tz_name falls back to UTC (treats the value as already UTC).
+    This handles date rollovers automatically: 06:21 IST = 00:51 UTC same day;
+    05:15 IST = 23:45 UTC the previous calendar day.
+    Invalid tz_name falls back to UTC.
     """
-    if naive_local.tzinfo is not None:
-        return naive_local.astimezone(UTC)
-    local = naive_local.replace(tzinfo=_get_tz(tz_name))
+    # Strip any tzinfo the LLM may have attached — always treat as local wall-clock.
+    wall_clock = naive_local.replace(tzinfo=None)
+    local = wall_clock.replace(tzinfo=_get_tz(tz_name))
     return local.astimezone(UTC)
