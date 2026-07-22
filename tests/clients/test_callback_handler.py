@@ -342,6 +342,9 @@ async def test_ok_choice_claims_then_executes_and_confirms() -> None:
     assert statuses[0] == "executing"
     # Final status is "confirmed"
     assert row.status == "confirmed"
+    # callback.answer called once immediately with "Posting…" (before execution)
+    cb.answer.assert_called_once()
+    assert "posting" in cb.answer.call_args[0][0].lower()
     # Registry called with _approved=True
     registry.execute.assert_called_once()
     call_kwargs = registry.execute.call_args.kwargs
@@ -373,8 +376,9 @@ async def test_execution_failure_sets_failed_status() -> None:
         )
 
     assert row.status == "failed"
-    cb.answer.assert_called()
-    assert "failed" in cb.answer.call_args[0][0].lower()
+    # callback.answer is called once upfront with "Posting…" — failure is shown via message edit
+    cb.answer.assert_called_once()
+    assert "posting" in cb.answer.call_args[0][0].lower()
 
 
 # ---------------------------------------------------------------------------

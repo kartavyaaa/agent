@@ -76,21 +76,22 @@ async def test_execute_creates_scheduled_post_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_localizes_naive_datetime_via_tz_name() -> None:
-    """Naive local datetime must be localized using tz_name, NOT stamped as UTC.
+async def test_execute_localizes_ist_morning_to_utc() -> None:
+    """LLM emits local wall-clock 02:05 IST — plugin must convert to UTC correctly.
 
-    IST is UTC+5:30. 05:15 local IST = 23:45 UTC the PREVIOUS calendar day.
-    This is the exact date-rollback case that caused the prod scheduling bug.
+    The LLM is now given the current LOCAL time in the system prompt, so it should
+    emit the correct LOCAL date. localize_to_utc strips tzinfo and stamps Asia/Kolkata.
+
+    2026-07-22 02:05 IST (naive, from LLM) → 2026-07-21 20:35 UTC.
     """
     plugin = SchedulePostPlugin(tz_name="Asia/Kolkata")
     db = _make_db()
 
-    # LLM emits: user said "5:15am" on July 22 IST → naive local 2026-07-22T05:15:00
-    local_ist = datetime(2026, 7, 22, 5, 15)
-    assert local_ist.tzinfo is None
+    # LLM emits the correct local date because the system prompt gave it 'now in IST'
+    llm_datetime = datetime(2026, 7, 22, 2, 5)  # naive local IST, correct date
 
     await plugin.execute(
-        SchedulePostInput(caption="Test caption", scheduled_for=local_ist),
+        SchedulePostInput(caption="Early morning post", scheduled_for=llm_datetime),
         user_id=uuid.uuid4(),
         db=db,
         image_url="https://cdn.example.com/photo.jpg",
@@ -99,24 +100,20 @@ async def test_execute_localizes_naive_datetime_via_tz_name() -> None:
     added_row = db.add.call_args[0][0]
     stored = added_row.scheduled_for
     assert stored.tzinfo is not None
-    # 05:15 IST = 23:45 UTC on July 21 (date rolls back a day)
-    assert stored.year == 2026
-    assert stored.month == 7
-    assert stored.day == 21
-    assert stored.hour == 23
-    assert stored.minute == 45
+    # 02:05 IST = 20:35 UTC previous day
+    assert stored == datetime(2026, 7, 21, 20, 35, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
-async def test_execute_ist_no_date_rollback_for_afternoon() -> None:
-    """14:00 IST = 08:30 UTC same day — no rollback."""
+async def test_execute_localizes_ist_afternoon_to_utc() -> None:
+    """18:00 IST (naive) → 12:30 UTC same calendar day."""
     plugin = SchedulePostPlugin(tz_name="Asia/Kolkata")
     db = _make_db()
 
-    local_ist = datetime(2026, 7, 22, 14, 0)  # 2pm IST July 22
+    llm_datetime = datetime(2026, 7, 22, 18, 0)  # 6pm IST, naive
 
     await plugin.execute(
-        SchedulePostInput(caption="Afternoon post", scheduled_for=local_ist),
+        SchedulePostInput(caption="Afternoon post", scheduled_for=llm_datetime),
         user_id=uuid.uuid4(),
         db=db,
         image_url="https://cdn.example.com/photo.jpg",
@@ -124,10 +121,30 @@ async def test_execute_ist_no_date_rollback_for_afternoon() -> None:
 
     added_row = db.add.call_args[0][0]
     stored = added_row.scheduled_for
-    # 14:00 IST = 08:30 UTC same day
-    assert stored.day == 22
-    assert stored.hour == 8
-    assert stored.minute == 30
+    assert stored == datetime(2026, 7, 22, 12, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_execute_localizes_explicit_future_date() -> None:
+    """'Post on Friday July 25 at 5pm' — LLM emits the full explicit date, must be preserved.
+
+    localize_to_utc trusts the LLM's date. 2026-07-25 17:00 IST → 2026-07-25 11:30 UTC.
+    """
+    plugin = SchedulePostPlugin(tz_name="Asia/Kolkata")
+    db = _make_db()
+
+    llm_datetime = datetime(2026, 7, 25, 17, 0)  # Friday 5pm IST, naive
+
+    await plugin.execute(
+        SchedulePostInput(caption="Friday post", scheduled_for=llm_datetime),
+        user_id=uuid.uuid4(),
+        db=db,
+        image_url="https://cdn.example.com/photo.jpg",
+    )
+
+    added_row = db.add.call_args[0][0]
+    stored = added_row.scheduled_for
+    assert stored == datetime(2026, 7, 25, 11, 30, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

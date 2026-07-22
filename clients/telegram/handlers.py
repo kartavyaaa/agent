@@ -356,6 +356,12 @@ async def handle_callback(
             await db.flush()
             await db.commit()
 
+            # Answer the callback IMMEDIATELY — Telegram requires a response within
+            # ~15s or it shows "query is too old". Slow actions (carousel ~40s) would
+            # miss this window if we answered after execute(). Message edits have no
+            # time limit, so we answer now and edit the message after execution.
+            await callback.answer("Posting…")
+
             feedback: str = "✅ Done."
             try:
                 result = await registry.execute(
@@ -369,7 +375,6 @@ async def handle_callback(
                 row.status = "confirmed"
                 await db.flush()
                 await db.commit()
-                await callback.answer("Done!")
             except PlatformError as exc:
                 row.status = "failed"
                 await db.flush()
@@ -380,14 +385,12 @@ async def handle_callback(
                     exc_type=type(exc).__name__,
                 )
                 feedback = f"❌ {user_message(exc)}"
-                await callback.answer("Failed.")
             except Exception:
                 row.status = "failed"
                 await db.flush()
                 await db.commit()
                 log.exception("callback.execute_unexpected_error", action_type=row.action_type)
                 feedback = "❌ Execution failed."
-                await callback.answer("Failed.")
             if isinstance(callback.message, Message):
                 await _edit_message_feedback(callback.message, feedback)
 
