@@ -61,6 +61,7 @@ class ReActPlanner(PlannerBase):
         user_id: uuid.UUID,
         db: AsyncSession,
         image_url_provider: Callable[[], Awaitable[str]] | None = None,
+        image_urls_provider: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> PlannerResult:
         log = structlog.get_logger().bind(user_id=str(user_id))
         history = list(messages)
@@ -118,6 +119,7 @@ class ReActPlanner(PlannerBase):
                     user_id=user_id,
                     db=db,
                     _image_url_provider=image_url_provider,
+                    _image_urls_provider=image_urls_provider,
                 )
                 if out.get("__approval_required__"):
                     plugin = self._registry.get_plugin(out["tool"])

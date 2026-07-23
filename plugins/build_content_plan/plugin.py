@@ -5,13 +5,13 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.exceptions import PluginError
-from core.timeutil import format_local, localize_to_utc
 from models.content_plan import ContentPlan
-from models.scheduled_post import ScheduledPost
 from plugins.base import HealthStatus, PluginBase
+from plugins.build_content_plan.render import parse_preview_time, render_items
 from plugins.build_content_plan.schemas import (
     BuildContentPlanConfig,
     BuildContentPlanInput,
@@ -23,31 +23,14 @@ _MIN_CAROUSEL = 2
 _MAX_CAROUSEL = 10
 
 
-def _parse_preview_time(raw: Any) -> str:
-    """Format the LLM's raw scheduled_for value for the pre-tap preview.
-
-    The value may arrive as a datetime (Pydantic-parsed) or a string.
-    Returns a human-readable local string like "Mon Jul 28, 6:00 PM".
-    Uses explicit lstrip("0") for cross-platform compat (%-d/%-I are Linux-only).
-    """
-    try:
-        dt = raw if isinstance(raw, datetime) else datetime.fromisoformat(str(raw).replace("Z", ""))
-        day = str(dt.day)
-        hour = str(dt.hour % 12 or 12)
-        ampm = "AM" if dt.hour < 12 else "PM"
-        minute = dt.strftime("%M")
-        return dt.strftime(f"%a %b {day}, {hour}:{minute} {ampm}")
-    except Exception:
-        return str(raw)
-
-
 class BuildContentPlanPlugin(PluginBase):
     """Build a scheduled content plan from multiple photos.
 
-    requires_approval=True: the user sees a plan summary and taps Confirm before
-    any ScheduledPost rows are created.
+    requires_approval=False: the plugin now creates a DRAFT (no ScheduledPost rows).
+    The user edits via edit_draft_plan, then approves via approve_draft_plan.
     needs_hosted_images=True: the engine uploads all N images to R2 and injects
-    a flat list of URLs. Items specify which indices belong to them.
+    a flat list of URLs via the lazy plural provider. Items specify which indices
+    belong to them.
     """
 
     name: ClassVar[str] = "build_content_plan"
@@ -68,7 +51,7 @@ class BuildContentPlanPlugin(PluginBase):
     input_schema: ClassVar[type[BaseModel]] = BuildContentPlanInput
     output_schema: ClassVar[type[BaseModel]] = BuildContentPlanOutput
     config_schema: ClassVar[type[BaseModel]] = BuildContentPlanConfig
-    requires_approval: ClassVar[bool] = True
+    requires_approval: ClassVar[bool] = False
     needs_hosted_image: ClassVar[bool] = False
     needs_hosted_images: ClassVar[bool] = True
 
@@ -88,7 +71,7 @@ class BuildContentPlanPlugin(PluginBase):
             caption: str = item.get("caption", "")
             caption_preview = (caption[:57] + "…") if len(caption) > 60 else caption
             raw_time = item.get("scheduled_for", "")
-            time_str = _parse_preview_time(raw_time)
+            time_str = parse_preview_time(raw_time)
             lines.append(
                 f"  {i}. {kind} ({n} photo{'s' if n != 1 else ''}) — \"{caption_preview}\" — {time_str}"
             )
@@ -115,55 +98,42 @@ class BuildContentPlanPlugin(PluginBase):
 
         self._validate_items(input.items, len(image_urls))
 
-        plan = ContentPlan(id=uuid.uuid4(), user_id=user_id, status="approved")
+        # Auto-discard any existing draft for this user
+        await db.execute(
+            sa_update(ContentPlan)
+            .where(ContentPlan.user_id == user_id, ContentPlan.status == "draft")
+            .values(status="discarded")
+        )
+
+        # Serialize items to JSONB-compatible dicts
+        items_data = [
+            {
+                "image_indices": item.image_indices,
+                "caption": item.caption,
+                "scheduled_for": item.scheduled_for.isoformat(),
+            }
+            for item in input.items
+        ]
+
+        plan = ContentPlan(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            status="draft",
+            items=items_data,
+            image_urls=image_urls,
+        )
         db.add(plan)
         await db.flush()
 
-        post_rows: list[ScheduledPost] = []
-        for item in input.items:
-            actual_urls = [image_urls[i] for i in item.image_indices]
-            scheduled_for_utc = localize_to_utc(item.scheduled_for, self._tz_name)
-            n = len(actual_urls)
-            if n == 1:
-                row = ScheduledPost(
-                    id=uuid.uuid4(),
-                    user_id=user_id,
-                    post_type="single",
-                    image_url=actual_urls[0],
-                    image_urls=None,
-                    plan_id=plan.id,
-                    caption=item.caption,
-                    scheduled_for=scheduled_for_utc,
-                    status="scheduled",
-                )
-            else:
-                row = ScheduledPost(
-                    id=uuid.uuid4(),
-                    user_id=user_id,
-                    post_type="carousel",
-                    image_url=None,
-                    image_urls=actual_urls,
-                    plan_id=plan.id,
-                    caption=item.caption,
-                    scheduled_for=scheduled_for_utc,
-                    status="scheduled",
-                )
-            db.add(row)
-            post_rows.append(row)
-
-        await db.flush()
-
-        schedule_lines = [
-            f"  • {format_local(r.scheduled_for, self._tz_name)} — {r.post_type} — {r.caption[:40]}"
-            for r in post_rows
-        ]
+        rendered = render_items(items_data)
         confirmation = (
-            f"✅ Scheduled {len(post_rows)} post{'s' if len(post_rows) != 1 else ''} — "
-            f"each will ask for confirmation when it's time:\n" + "\n".join(schedule_lines)
+            f"📅 Draft plan ({len(input.items)} post{'s' if len(input.items) != 1 else ''}):\n"
+            + rendered
+            + "\n\nReply to edit, or say 'approve' when ready."
         )
         return BuildContentPlanOutput(
             content_plan_id=str(plan.id),
-            scheduled_post_ids=[str(r.id) for r in post_rows],
+            scheduled_post_ids=[],
             confirmation=confirmation,
         )
 
@@ -181,6 +151,23 @@ class BuildContentPlanPlugin(PluginBase):
             if n > _MAX_CAROUSEL:
                 raise PluginError(
                     f"Item {i + 1} has {n} images — maximum for a carousel is {_MAX_CAROUSEL}."
+                )
+
+    @staticmethod
+    def _validate_items_data(items: list[dict[str, Any]], n_images: int) -> None:
+        """Validate raw JSONB item dicts (used by edit_draft_plan after mutations)."""
+        for i, item in enumerate(items):
+            indices: list[int] = item.get("image_indices", [])
+            if not indices:
+                raise PluginError(f"Item {i + 1} has no image_indices.")
+            for idx_val in indices:
+                if idx_val < 0 or idx_val >= n_images:
+                    raise PluginError(
+                        f"Item {i + 1} image_index {idx_val} is out of range (0–{n_images - 1})."
+                    )
+            if len(indices) > _MAX_CAROUSEL:
+                raise PluginError(
+                    f"Item {i + 1} has {len(indices)} images — maximum is {_MAX_CAROUSEL}."
                 )
 
     async def health_check(self) -> HealthStatus:

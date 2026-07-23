@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base
@@ -20,6 +21,8 @@ class ContentPlan(Base):
         nullable=False,
     )
     status: Mapped[str] = mapped_column(String(20), server_default="approved", nullable=False)
+    items: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    image_urls: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

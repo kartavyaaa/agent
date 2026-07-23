@@ -1623,3 +1623,80 @@ worker errors.
   `LLMRateLimitError` is retried); deferred until we know if timeouts are
   transient or persistent for this workload.
 
+---
+
+## 2026-07-23 — Slice 5A + 5B: multi-item content plans + conversational draft editing
+
+### What was built
+
+**Slice 5A — Multi-item scheduled content plan:**
+- `models/content_plan.py`: new `ContentPlan` model. `scheduled_posts` extended with
+  `post_type`, `image_urls` JSONB, `plan_id` FK. Migration 0005.
+- `plugins/build_content_plan/`: plan creation, list, cancel sub-plugins.
+- Worker (`core/scheduler/jobs.py`): carousel branch — `post_type='carousel'` rows dispatch
+  `instagram_carousel` action type at scheduled time.
+- System prompt + `instagram_carousel` description updated: verb-agnostic routing so any
+  multi-photo + future time → `build_content_plan` regardless of verb.
+- R2 upload errors wrapped as `IntegrationError` with `log.exception` before raise.
+
+**Slice 5B — Conversational draft editing:**
+- `build_content_plan` changed to `requires_approval=False`. Now creates `status='draft'`
+  `ContentPlan` row with `items` JSONB (serialized plan items) and `image_urls` JSONB (flat
+  R2 URL list). Auto-discards any prior draft for the user. Returns draft summary as plain
+  text — no Confirm button at this stage.
+- `edit_draft_plan`: structured edit ops (drop/edit_caption/edit_time/reorder/merge/split).
+  CRITICAL invariant: `image_indices` always reference the ORIGINAL `plan.image_urls` list
+  and are never renumbered across mutations — `approve_draft_plan` resolves them correctly
+  regardless of how many edits occurred.
+- `approve_draft_plan` (`requires_approval=True`): reads draft items + image_urls, creates
+  `ScheduledPost` rows, sets `status='approved'`. Confirm button appears only here.
+- `discard_draft_plan`: sets `status='discarded'`.
+- Migration 0006: adds `items JSONB` + `image_urls JSONB` to `content_plans`.
+
+**R2 upload wiring (key design):**
+- `needs_hosted_images=True` was coupled to the approval path (only fired inside the
+  `pending_action` branch). With `build_content_plan.requires_approval=False`, the old path
+  never fires. Solution: lazy `_image_urls_provider` callable (mirror of existing
+  `_image_url_provider`). Closure built in engine, only called when registry actually
+  dispatches to a `needs_hosted_images=True, requires_approval=False` plugin. Zero wasted
+  R2 uploads for critique-only multi-photo messages.
+- Three files changed: `registry.execute()` (new `_image_urls_provider` branch),
+  `react.py` (forward param), `engine.py` (closure + pass to planner).
+
+**Draft routing:**
+- Engine queries for `status='draft'` ContentPlan before building the system prompt.
+  If found, injects `draft_block` with rendered item list + routing instructions for
+  edit/approve/discard. Unrelated messages ("what's the weather") leave the draft intact.
+- Routing stress cases to verify live: "actually make #2 a carousel" → `edit_draft_plan`,
+  "yeah that works" → `approve_draft_plan`, "what's the weather" → normal, "cancel" →
+  `discard_draft_plan`.
+
+### What failed / was corrected
+
+1. **Split producing empty caption**: initial plan had split leaving new item with empty
+   caption. Corrected: split copies source caption to both resulting items.
+2. **Stale draft accumulation**: first plan left `status='draft'` rows orphaned if user
+   started a second plan. Fixed: `build_content_plan.execute()` auto-discards all existing
+   drafts for the user before creating the new one.
+3. **Eager R2 upload considered and rejected**: pre-planner upload would fire on every
+   multi-photo message. Lazy provider is correct — upload only when plugin is actually invoked.
+
+### Key insight
+
+The structured-op approach (not full-regen) was essential. Full regen would have re-triggered
+`requires_approval=True` on each edit, creating a new `PendingAction` and cancelling the
+existing draft. Structured ops + `requires_approval=False` on `edit_draft_plan` mean edits
+return results directly through the planner without any approval round-trip.
+
+The image_indices invariant is the correctness spine of the whole feature. Items reference
+original images by stable index — no renumbering after drops/merges/splits/reorders. The
+regression test (merge + split + reorder → approve → verify correct image_urls per post) is
+the guard.
+
+### Deferred
+
+- Live routing verification (requires deployed build): hammer "actually make #2 a carousel",
+  "yeah that works", "what's the weather", "cancel" — all must route correctly.
+- Editing already-APPROVED plans (change time on a post already scheduled) — different flow,
+  later slice.
+- Undo last edit — straightforward addition once structured ops are proven in prod.

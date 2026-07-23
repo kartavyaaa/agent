@@ -41,9 +41,10 @@ def _message_response(text: str) -> LLMResponse:
 def _make_db(has_existing_pending: bool = False) -> MagicMock:
     """Build a mock DB session.
 
-    db.execute is called twice in the approval path:
+    db.execute is called three times in the approval path:
       1. get_or_create_user (returns a truthy user)
-      2. select(PendingAction) (returns existing row or None)
+      2. draft_block ContentPlan query (returns None — no active draft)
+      3. select(PendingAction) (returns existing row or None)
     """
     mock_db = MagicMock()
     mock_db.commit = AsyncMock()
@@ -54,11 +55,14 @@ def _make_db(has_existing_pending: bool = False) -> MagicMock:
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = MagicMock()  # user found
 
+    no_draft_result = MagicMock()
+    no_draft_result.scalar_one_or_none.return_value = None  # no active draft
+
     existing_row = MagicMock() if has_existing_pending else None
     pending_result = MagicMock()
     pending_result.scalar_one_or_none.return_value = existing_row
 
-    mock_db.execute = AsyncMock(side_effect=[user_result, pending_result])
+    mock_db.execute = AsyncMock(side_effect=[user_result, no_draft_result, pending_result])
     return mock_db
 
 
@@ -264,9 +268,11 @@ def _make_db_for_image_test() -> MagicMock:
     mock_db.flush = AsyncMock()
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = MagicMock()
+    no_draft_result = MagicMock()
+    no_draft_result.scalar_one_or_none.return_value = None  # no active draft
     pending_result = MagicMock()
     pending_result.scalar_one_or_none.return_value = None
-    mock_db.execute = AsyncMock(side_effect=[user_result, pending_result])
+    mock_db.execute = AsyncMock(side_effect=[user_result, no_draft_result, pending_result])
     return mock_db
 
 

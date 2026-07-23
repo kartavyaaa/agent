@@ -86,6 +86,7 @@ class ToolRegistry:
         db: AsyncSession,
         _approved: bool = False,
         _image_url_provider: Callable[[], Awaitable[str]] | None = None,
+        _image_urls_provider: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> dict[str, Any]:
         plugin = self._plugins.get(name)
         if plugin is None:
@@ -118,6 +119,14 @@ class ToolRegistry:
             and "image_url" not in injected
         ):
             injected["image_url"] = await _image_url_provider()
+
+        if (
+            getattr(plugin, "needs_hosted_images", False)
+            and not getattr(plugin, "requires_approval", False)
+            and _image_urls_provider is not None
+            and "image_urls" not in injected
+        ):
+            injected["image_urls"] = await _image_urls_provider()
 
         # Filter injected to only params the plugin's execute() actually accepts,
         # so plugins without image_url in their signature don't receive it.

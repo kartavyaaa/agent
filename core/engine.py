@@ -20,6 +20,7 @@ from core.planner.react import ReActPlanner
 from core.schemas import CoreRequest, CoreResponse, ProposalPayload
 from core.timeutil import format_local
 from core.tools.registry import ToolRegistry
+from models.content_plan import ContentPlan
 from models.pending_action import PendingAction
 
 if TYPE_CHECKING:
@@ -169,11 +170,37 @@ class CoreEngine:
                 lines = "\n".join(h.memory.content for h in hits)
                 recall_block = "\n\nRelevant past context (may or may not be useful):\n" + lines
 
+        # Draft-block: if the user has an active draft plan, inject context so the
+        # LLM knows to call edit_draft_plan / approve_draft_plan / discard_draft_plan.
+        draft_block = ""
+        draft_q = await db.execute(
+            select(ContentPlan)
+            .where(ContentPlan.user_id == request.user_id, ContentPlan.status == "draft")
+            .order_by(ContentPlan.created_at.desc())
+            .limit(1)
+        )
+        draft_plan = draft_q.scalar_one_or_none()
+        if draft_plan is not None and draft_plan.items:
+            from plugins.build_content_plan.render import render_items
+
+            rendered = render_items(draft_plan.items)
+            draft_block = (
+                f"\n\nThe user has an active draft content plan (plan_id={draft_plan.id}) "
+                f"with {len(draft_plan.items)} item(s):\n{rendered}\n"
+                "If the user edits the plan, call edit_draft_plan. "
+                "If the user says it looks good or approves, call approve_draft_plan (pass "
+                "plan_summary as the rendered list shown above). "
+                "If the user discards/cancels the plan, call discard_draft_plan. "
+                "If the user's message is unrelated to the plan (weather, reminders, etc.), "
+                "respond normally and do NOT touch the draft."
+            )
+
         system_msg = LLMMessage(
             role="system",
             content=_SYSTEM_PROMPT.format(now_local=now_local, tz=tz_name, tools=tool_names)
             + recall_block
-            + history_block,
+            + history_block
+            + draft_block,
         )
         if request.images:
             # Batch path: N images → content-plan. detail="high" mirrors probe/probe_multi_image.py.
@@ -226,6 +253,35 @@ class CoreEngine:
 
         image_url_provider = _provide_image_url if self._r2 is not None else None
 
+        # Upload helper shared by the plural lazy provider and the approval proposal branch.
+        # Any non-PlatformError from R2 (e.g. raw botocore.ClientError after retries) is
+        # wrapped in IntegrationError so the caller always sees a PlatformError.
+        async def _upload_single_image(b64: str, mime: str) -> str:
+            img_bytes = base64.b64decode(b64)
+            r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
+            assert self._r2 is not None
+            try:
+                url = await self._r2.upload(img_bytes, key=r2_key, content_type=mime)
+            except Exception as exc:
+                from core.exceptions import PlatformError
+
+                if isinstance(exc, PlatformError):
+                    raise
+                log.exception("engine.r2_upload_failed", key=r2_key, error=str(exc))
+                raise IntegrationError(f"Image upload failed: {exc}") from exc
+            log.info("engine.r2_upload", key=r2_key)
+            return url
+
+        async def _provide_image_urls() -> list[str]:
+            if not request.images:
+                from core.exceptions import PluginError
+
+                raise PluginError("This plugin requires photos. Please send some.")
+            assert self._r2 is not None
+            return [await _upload_single_image(img.data, img.mime) for img in request.images]
+
+        image_urls_provider = _provide_image_urls if self._r2 is not None else None
+
         planner = ReActPlanner(
             llm=self._llm,
             registry=self._registry,
@@ -241,30 +297,12 @@ class CoreEngine:
             user_id=request.user_id,
             db=db,
             image_url_provider=image_url_provider,
+            image_urls_provider=image_urls_provider,
         )
 
         if plan_result.pending_action is not None:
             pa = plan_result.pending_action
             plugin = self._registry.get_plugin(pa.action_type)
-
-            # Upload helper shared by the singular and plural hosted-image branches.
-            # Any non-PlatformError from R2 (e.g. raw botocore.ClientError after retries)
-            # is wrapped in IntegrationError so the caller always sees a PlatformError.
-            async def _upload_single_image(b64: str, mime: str) -> str:
-                img_bytes = base64.b64decode(b64)
-                r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
-                assert self._r2 is not None
-                try:
-                    url = await self._r2.upload(img_bytes, key=r2_key, content_type=mime)
-                except Exception as exc:
-                    from core.exceptions import PlatformError
-
-                    if isinstance(exc, PlatformError):
-                        raise
-                    log.exception("engine.r2_upload_failed", key=r2_key, error=str(exc))
-                    raise IntegrationError(f"Image upload failed: {exc}") from exc
-                log.info("engine.r2_upload", key=r2_key)
-                return url
 
             # If the action needs a single hosted image, upload now (bytes available in
             # request.image_base64). Only fires in the proposal branch — ordinary photo

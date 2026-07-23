@@ -24,7 +24,10 @@ from integrations.local_fs import LocalFsClient
 from integrations.r2 import R2Client
 from integrations.serper import SerperClient
 from plugins.approval_test.plugin import ApprovalTestPlugin
+from plugins.build_content_plan.approve import ApproveDraftPlanPlugin
 from plugins.build_content_plan.cancel import CancelContentPlanPlugin
+from plugins.build_content_plan.discard import DiscardDraftPlanPlugin
+from plugins.build_content_plan.edit import EditDraftPlanPlugin
 from plugins.build_content_plan.list import ListContentPlansPlugin
 from plugins.build_content_plan.plugin import BuildContentPlanPlugin
 from plugins.file_reader.plugin import FileReaderPlugin
@@ -136,6 +139,9 @@ async def build_engine(
             registry.register(BuildContentPlanPlugin(tz_name=s.default_timezone))
             registry.register(ListContentPlansPlugin(tz_name=s.default_timezone))
             registry.register(CancelContentPlanPlugin())
+            registry.register(EditDraftPlanPlugin(tz_name=s.default_timezone))
+            registry.register(ApproveDraftPlanPlugin(tz_name=s.default_timezone))
+            registry.register(DiscardDraftPlanPlugin())
         else:
             log.warning(
                 "instagram.not_configured",

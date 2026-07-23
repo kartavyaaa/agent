@@ -25,6 +25,7 @@ def _make_db() -> MagicMock:
     db = MagicMock()
     db.add = MagicMock()
     db.flush = AsyncMock()
+    db.execute = AsyncMock()
     return db
 
 
@@ -39,8 +40,8 @@ _T3 = datetime(2026, 7, 30, 18, 0)
 # ---------------------------------------------------------------------------
 
 
-def test_requires_approval_is_true() -> None:
-    assert BuildContentPlanPlugin.requires_approval is True
+def test_requires_approval_is_false() -> None:
+    assert BuildContentPlanPlugin.requires_approval is False
 
 
 def test_needs_hosted_images_is_true() -> None:
@@ -102,12 +103,12 @@ def test_build_preview_formats_time_humanly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute() — happy path: mixed single + carousel
+# execute() — happy path: creates DRAFT (no ScheduledPost rows)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_creates_plan_and_posts() -> None:
+async def test_execute_creates_draft_plan_no_posts() -> None:
     plugin = _make_plugin()
     db = _make_db()
     uid = uuid.uuid4()
@@ -124,62 +125,63 @@ async def test_execute_creates_plan_and_posts() -> None:
 
     assert isinstance(result, BuildContentPlanOutput)
     assert result.content_plan_id  # non-empty UUID str
-    assert len(result.scheduled_post_ids) == 3
+    # Draft mode: no ScheduledPost rows created
+    assert result.scheduled_post_ids == []
     assert "3" in result.confirmation
-    assert db.flush.call_count >= 2
+    # Only 1 db.add call (for ContentPlan — no ScheduledPosts)
+    assert db.add.call_count == 1
 
     added = db.add.call_args_list
-    assert len(added) == 4  # 1 ContentPlan + 3 ScheduledPosts
-
-    # Check ScheduledPost objects
-    from models.scheduled_post import ScheduledPost
-
-    posts = [call.args[0] for call in added if isinstance(call.args[0], ScheduledPost)]
-    assert len(posts) == 3
-
-    single1, carousel, single2 = posts
-    assert single1.post_type == "single"
-    assert single1.image_url == _URLS[0]
-    assert single1.image_urls is None
-    assert single1.caption == "Single shot"
-
-    assert carousel.post_type == "carousel"
-    assert carousel.image_url is None
-    assert carousel.image_urls == [_URLS[1], _URLS[2], _URLS[3]]
-    assert carousel.caption == "Carousel series"
-
-    assert single2.post_type == "single"
-    assert single2.image_url == _URLS[4]
-
-    # All posts must have the same plan_id
     from models.content_plan import ContentPlan
 
     plan = [call.args[0] for call in added if isinstance(call.args[0], ContentPlan)][0]
-    assert single1.plan_id == plan.id
-    assert carousel.plan_id == plan.id
-    assert single2.plan_id == plan.id
+    assert plan.status == "draft"
+    assert plan.items is not None
+    assert len(plan.items) == 3
+    assert plan.image_urls == _URLS
 
 
 @pytest.mark.asyncio
-async def test_execute_localizes_scheduled_for_to_utc() -> None:
-    """localize_to_utc must be applied — IST 18:00 → UTC 12:30."""
-    plugin = _make_plugin(tz="Asia/Kolkata")
+async def test_execute_status_is_draft() -> None:
+    plugin = _make_plugin()
     db = _make_db()
-
     input_ = BuildContentPlanInput(
         items=[PlanItem(image_indices=[0], caption="Test", scheduled_for=_T1)]
     )
     await plugin.execute(input_, user_id=uuid.uuid4(), db=db, image_urls=_URLS)
 
-    from models.scheduled_post import ScheduledPost
+    from models.content_plan import ContentPlan
 
-    posts = [
-        call.args[0] for call in db.add.call_args_list if isinstance(call.args[0], ScheduledPost)
-    ]
-    assert len(posts) == 1
-    utc_hour = posts[0].scheduled_for.hour
-    # 18:00 IST = 12:30 UTC
-    assert utc_hour == 12
+    added = db.add.call_args_list
+    plan = [call.args[0] for call in added if isinstance(call.args[0], ContentPlan)][0]
+    assert plan.status == "draft"
+
+
+@pytest.mark.asyncio
+async def test_execute_auto_discards_existing_draft() -> None:
+    """execute() should issue an UPDATE to discard any existing draft before creating a new one."""
+    plugin = _make_plugin()
+    db = _make_db()
+    uid = uuid.uuid4()
+
+    input_ = BuildContentPlanInput(
+        items=[PlanItem(image_indices=[0], caption="New plan", scheduled_for=_T1)]
+    )
+    await plugin.execute(input_, user_id=uid, db=db, image_urls=_URLS)
+
+    # db.execute should have been called with the UPDATE (auto-discard)
+    assert db.execute.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_execute_confirmation_contains_approve_hint() -> None:
+    plugin = _make_plugin()
+    db = _make_db()
+    input_ = BuildContentPlanInput(
+        items=[PlanItem(image_indices=[0], caption="Test", scheduled_for=_T1)]
+    )
+    result = await plugin.execute(input_, user_id=uuid.uuid4(), db=db, image_urls=_URLS)
+    assert "approve" in result.confirmation.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -239,3 +241,31 @@ async def test_execute_raises_empty_image_indices() -> None:
     )
     with pytest.raises(PluginError, match="no image_indices"):
         await plugin.execute(input_, user_id=uuid.uuid4(), db=db, image_urls=_URLS)
+
+
+# ---------------------------------------------------------------------------
+# _validate_items_data (static helper for edit_draft_plan)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_items_data_ok() -> None:
+    items = [{"image_indices": [0, 1], "caption": "test", "scheduled_for": "2026-07-28T18:00:00"}]
+    BuildContentPlanPlugin._validate_items_data(items, 3)  # no exception
+
+
+def test_validate_items_data_out_of_range() -> None:
+    items = [{"image_indices": [5], "caption": "test", "scheduled_for": "2026-07-28T18:00:00"}]
+    with pytest.raises(PluginError, match="out of range"):
+        BuildContentPlanPlugin._validate_items_data(items, 3)
+
+
+def test_validate_items_data_too_many() -> None:
+    items = [
+        {
+            "image_indices": list(range(11)),
+            "caption": "test",
+            "scheduled_for": "2026-07-28T18:00:00",
+        }
+    ]
+    with pytest.raises(PluginError, match="maximum"):
+        BuildContentPlanPlugin._validate_items_data(items, 12)

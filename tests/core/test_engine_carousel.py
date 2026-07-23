@@ -45,9 +45,11 @@ def _make_db() -> MagicMock:
     mock_db.flush = AsyncMock()
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = MagicMock()
+    no_draft_result = MagicMock()
+    no_draft_result.scalar_one_or_none.return_value = None  # no active draft
     pending_result = MagicMock()
     pending_result.scalar_one_or_none.return_value = None
-    mock_db.execute = AsyncMock(side_effect=[user_result, pending_result])
+    mock_db.execute = AsyncMock(side_effect=[user_result, no_draft_result, pending_result])
     return mock_db
 
 
