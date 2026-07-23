@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     openai_fast_model: str = "gpt-5.4-nano"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_max_retries: int = 3
-    openai_timeout_seconds: float = 60.0
+    openai_timeout_seconds: float = 30.0
 
     # Planner
     planner_max_iterations: int = 8

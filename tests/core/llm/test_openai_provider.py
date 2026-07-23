@@ -176,6 +176,26 @@ async def test_complete_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_httpx_timeout_maps_to_llm_timeout_error() -> None:
+    """httpx.TimeoutException (low-level) must be caught and wrapped as LLMTimeoutError.
+
+    openai.APITimeoutError wraps most timeouts, but connection-phase timeouts can
+    surface as raw httpx.TimeoutException before the OpenAI SDK wraps them.
+    """
+    import httpx
+
+    provider = _make_provider()
+
+    async def _httpx_timeout(*args: object, **kwargs: object) -> SimpleNamespace:
+        raise httpx.ConnectTimeout("Connection timed out")
+
+    _mock_client(provider).responses.create = _httpx_timeout
+
+    with pytest.raises(LLMTimeoutError):
+        await provider.complete(_messages(), tools=None, config=_config())
+
+
+@pytest.mark.asyncio
 async def test_embed_cache() -> None:
     provider = _make_provider()
 

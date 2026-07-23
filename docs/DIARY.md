@@ -1539,3 +1539,87 @@ test with real SERPER_API_KEY returned results.
 - Full pytest -v (0 skipped) including boto3/httpx-dependent tests excluded on VM
 - `docker compose up --build` + `/health` 200 + worker log shows both cron jobs registered
 - Live test on Oracle VM: 6 scenarios (schedule, confirm, cancel, double-tap, expiry)
+
+---
+
+## 2026-07-22 — Fix: structlog tracebacks + LLM timeout safety
+
+### Problem
+
+Prod logs showed zero tracebacks for any error — every `log.exception()` call
+produced an event dict with no exception key. The structlog processor chain in
+`core/logging.py` was missing `format_exc_info`. `StackInfoRenderer` only
+handles `stack_info=` (a different kwarg); `exc_info=True` (set by
+`log.exception`) was silently dropped before the renderer. This made all prod
+error diagnosis require circular guessing — the "post these at 6:53am" timeout
+investigation this session is the clearest example: 60+ second failure, no
+traceback, no root cause.
+
+The arq worker (`infra/worker/worker_settings.py`) was also missing
+`configure_logging()` in `startup()`, so worker-side errors (scheduled-post
+fires, Confirm-button execution) were using unconfigured structlog defaults —
+completely opaque.
+
+### What was tried / what failed
+
+The 6:53am failure showed ~61s of total silence in prod logs with no
+"POST /v1/responses" line. Initial hypothesis was routing (wrong plugin
+called) or R2 (image upload hung). Routing was fixed (verb-agnostic
+`build_content_plan` trigger), but the 6:53am error pattern wasn't routing
+— there was no tool call, just a hang then a generic fallback with no info.
+Without a traceback we couldn't confirm whether the hang was OpenAI connection,
+OpenAI read timeout, httpx below the SDK, or something else entirely.
+
+### What was built
+
+**Bug 1 — logging:**
+- `core/logging.py`: inserted `structlog.processors.format_exc_info` between
+  `StackInfoRenderer()` and the renderer. One line. Now both JSON (prod) and
+  ConsoleRenderer (dev) emit full tracebacks.
+- `infra/worker/worker_settings.py`: `startup()` now calls
+  `configure_logging(log_level=s.log_level, environment=s.environment)` before
+  any other setup. Worker now emits structured JSON + real tracebacks.
+
+**Bug 2 — LLM timeout safety net (unconfirmed cause):**
+- `core/llm/openai_provider.py`: added `httpx.TimeoutException` alongside
+  `openai.APITimeoutError` in the except clause. The OpenAI SDK wraps most
+  timeouts as `APITimeoutError`, but connection-phase timeouts can surface as
+  raw `httpx.TimeoutException` before the SDK catches them. This is a
+  reasonable safety net, not a confirmed fix — the REAL cause will be revealed
+  by the next occurrence now that tracebacks emit.
+- `core/config.py`: lowered `openai_timeout_seconds` default from 60s to 30s.
+  60s was silent failure territory; 30s gives a faster user-facing response
+  ("AI provider timed out. Try again later.") via the `LLMTimeoutError` path
+  that was already wired to `clients/errors.py`.
+
+### Key insight
+
+`LLMTimeoutError` was already handled — `user_message()` in `clients/errors.py`
+returns a friendly message for it, and the Telegram handler catches it as
+`PlatformError`. The problem was that `httpx.TimeoutException` was NOT caught,
+so it fell through to the generic `except Exception` branch → generic fallback
++ no traceback. Once tracebacks emit, the next occurrence will confirm whether
+this was the actual gap.
+
+**Worker errors were completely dark.** Every scheduled-post fire, carousel
+confirmation, and expiry reconciliation that failed silently was invisible in
+worker logs. The `configure_logging()` fix closes this gap for all future
+worker errors.
+
+### Tests
+
+- `tests/core/test_logging.py`: two tests capture stdout in both `production`
+  (JSON) and `development` (console) modes and assert real traceback text
+  appears in the output. These would have caught the missing `format_exc_info`
+  immediately.
+- `tests/core/llm/test_openai_provider.py`: added
+  `test_complete_httpx_timeout_maps_to_llm_timeout_error` — raises
+  `httpx.ConnectTimeout` from the mock, asserts `LLMTimeoutError` is raised.
+
+### Deferred
+
+- Confirm the actual 6:53am cause on next occurrence (tracebacks now emit).
+- Consider adding tenacity retry on `LLMTimeoutError` (currently only
+  `LLMRateLimitError` is retried); deferred until we know if timeouts are
+  transient or persistent for this workload.
+

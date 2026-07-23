@@ -8,12 +8,14 @@ from arq.connections import RedisSettings
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.config import get_settings
+from core.logging import configure_logging
 from core.notifications.telegram_notifier import TelegramNotifier
 from core.scheduler.jobs import poll_reminders, poll_scheduled_posts
 
 
 async def startup(ctx: dict[str, Any]) -> None:
     s = get_settings()
+    configure_logging(log_level=s.log_level, environment=s.environment)
     engine = create_async_engine(str(s.database_url))
     ctx["session_factory"] = async_sessionmaker(engine, expire_on_commit=False)
     ctx["http_client"] = httpx.AsyncClient()

@@ -22,6 +22,7 @@ def configure_logging(log_level: str = "INFO", environment: str = "development")
             structlog.stdlib.PositionalArgumentsFormatter(),
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

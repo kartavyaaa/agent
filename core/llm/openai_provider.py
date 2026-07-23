@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 
+import httpx
 import openai
 from openai import NOT_GIVEN, AsyncOpenAI
 from tenacity import (
@@ -95,7 +96,7 @@ class OpenAIProvider(LLMProvider):
             )
         except openai.RateLimitError as exc:
             raise LLMRateLimitError(str(exc)) from exc
-        except openai.APITimeoutError as exc:
+        except (openai.APITimeoutError, httpx.TimeoutException) as exc:
             raise LLMTimeoutError(str(exc)) from exc
 
         tool_calls: list[LLMToolCall] = []
