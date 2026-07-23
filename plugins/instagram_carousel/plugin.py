@@ -34,7 +34,9 @@ class InstagramCarouselPlugin(PluginBase):
     description: ClassVar[str] = (
         "Post multiple photos as a carousel to Instagram with a caption. "
         "Use this when the user explicitly asks to post or share multiple photos as a carousel "
-        "or multi-image post on Instagram. "
+        "or multi-image post on Instagram IMMEDIATELY (right now, not at a future scheduled time). "
+        "Do NOT use this when the user asks to schedule or post at a future time — use "
+        "build_content_plan instead. "
         "Call this tool DIRECTLY with the caption — do NOT ask the user for confirmation yourself first. "
         "The system automatically shows the user a confirmation prompt with buttons before anything is posted. "
         "Only call this on a turn where the user has actually sent multiple photos in the current message."

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from clients.user_helper import get_or_create_user
 from core.config import Settings
+from core.exceptions import IntegrationError
 from core.llm.base import LLMConfig, LLMMessage, LLMProvider
 from core.memory.manager import MemoryManager
 from core.planner.base import PendingActionProposal
@@ -46,8 +47,14 @@ _SYSTEM_PROMPT = (
     "The system converts the local datetime to UTC. "
     "otherwise provide a thoughtful critique covering composition, lighting, subject, and suggestions. "
     "When the user sends multiple photos AND explicitly asks to post them as a carousel or "
-    "multi-image post on Instagram NOW, call instagram_carousel with just the caption — do NOT ask "
-    "for confirmation in text first. The system shows a Confirm/Cancel prompt automatically. "
+    "multi-image post on Instagram immediately (right now), call instagram_carousel with just the "
+    "caption — do NOT ask for confirmation in text first. The system shows a Confirm/Cancel prompt "
+    "automatically. Do NOT call instagram_carousel if the user mentions a future time or asks to "
+    "schedule — use build_content_plan instead. "
+    "When the user sends multiple photos and wants to schedule a carousel at a specific future time "
+    "(e.g. 'schedule this carousel for 4pm', 'post these as carousel tomorrow at 6am'), call "
+    "build_content_plan with ONE item that groups all the photos (image_indices: [0, 1, ..., N-1]) "
+    "and the requested scheduled_for time. "
     "When the user sends multiple photos and wants them SCHEDULED as a series of future posts "
     "(e.g. 'schedule these', 'one a day', 'plan my week of posts', or any future posting intent), "
     "call build_content_plan with items — each item has image_indices (list of 0-based indices "
@@ -239,11 +246,21 @@ class CoreEngine:
             plugin = self._registry.get_plugin(pa.action_type)
 
             # Upload helper shared by the singular and plural hosted-image branches.
+            # Any non-PlatformError from R2 (e.g. raw botocore.ClientError after retries)
+            # is wrapped in IntegrationError so the caller always sees a PlatformError.
             async def _upload_single_image(b64: str, mime: str) -> str:
                 img_bytes = base64.b64decode(b64)
                 r2_key = f"{request.user_id}/{uuid.uuid4()}.jpg"
                 assert self._r2 is not None
-                url = await self._r2.upload(img_bytes, key=r2_key, content_type=mime)
+                try:
+                    url = await self._r2.upload(img_bytes, key=r2_key, content_type=mime)
+                except Exception as exc:
+                    from core.exceptions import PlatformError
+
+                    if isinstance(exc, PlatformError):
+                        raise
+                    log.exception("engine.r2_upload_failed", key=r2_key, error=str(exc))
+                    raise IntegrationError(f"Image upload failed: {exc}") from exc
                 log.info("engine.r2_upload", key=r2_key)
                 return url
 
