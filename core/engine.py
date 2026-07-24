@@ -170,9 +170,10 @@ class CoreEngine:
                 lines = "\n".join(h.memory.content for h in hits)
                 recall_block = "\n\nRelevant past context (may or may not be useful):\n" + lines
 
-        # Draft-block: if the user has an active draft plan, inject context so the
-        # LLM knows to call edit_draft_plan / approve_draft_plan / discard_draft_plan.
-        draft_block = ""
+        # Draft-block: always injected so the LLM has a definitive signal about draft state.
+        # Active draft  → full item list + routing instructions.
+        # No active draft → explicit sentinel so the LLM doesn't hallucinate draft-tool calls
+        #   based on plan content visible in history_block from a now-completed or discarded plan.
         draft_q = await db.execute(
             select(ContentPlan)
             .where(ContentPlan.user_id == request.user_id, ContentPlan.status == "draft")
@@ -193,6 +194,13 @@ class CoreEngine:
                 "If the user discards/cancels the plan, call discard_draft_plan. "
                 "If the user's message is unrelated to the plan (weather, reminders, etc.), "
                 "respond normally and do NOT touch the draft."
+            )
+        else:
+            # No active draft: explicit sentinel prevents LLM from calling draft-editing tools
+            # based on stale plan content that may appear in recent conversation history.
+            draft_block = (
+                "\n\nDraft plan status: NONE. There is no active draft content plan right now. "
+                "Do NOT call edit_draft_plan, approve_draft_plan, or discard_draft_plan."
             )
 
         system_msg = LLMMessage(

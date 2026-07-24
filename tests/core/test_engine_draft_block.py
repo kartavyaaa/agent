@@ -148,8 +148,9 @@ async def test_draft_block_injected_when_active_draft() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_draft_block_when_no_active_draft() -> None:
-    """system_msg.content has no draft instructions when no active draft."""
+async def test_no_draft_sentinel_when_no_active_draft() -> None:
+    """When no active draft, system_msg.content gets a 'NONE' sentinel instead of active-draft
+    routing instructions — prevents the LLM hallucinating draft-tool calls based on history."""
     engine, _, mock_llm = _make_engine_with_db_exec(
         exec_side_effect=[
             _user_exec_result(),
@@ -163,13 +164,17 @@ async def test_no_draft_block_when_no_active_draft() -> None:
     messages: list[LLMMessage] = call_args.kwargs.get("messages") or call_args.args[0]
     system_content = next(m.content for m in messages if m.role == "system")
 
-    assert "draft content plan" not in system_content
-    assert "edit_draft_plan" not in system_content
+    # Sentinel present — LLM knows there is no active draft
+    assert "NONE" in system_content
+    assert "no active draft" in system_content
+    # Active-draft routing instructions must NOT appear
+    assert "plan_id=" not in system_content
+    assert "If the user edits the plan" not in system_content
 
 
 @pytest.mark.asyncio
-async def test_no_draft_block_when_plan_has_no_items() -> None:
-    """system_msg.content has no draft block when draft plan exists but items is empty/None."""
+async def test_no_draft_sentinel_when_plan_has_no_items() -> None:
+    """When draft exists but items is empty, sentinel injected (same as no-draft case)."""
     plan_id = uuid.uuid4()
     draft = _make_draft_plan(plan_id, items=[])  # empty items
 
@@ -186,4 +191,6 @@ async def test_no_draft_block_when_plan_has_no_items() -> None:
     messages: list[LLMMessage] = call_args.kwargs.get("messages") or call_args.args[0]
     system_content = next(m.content for m in messages if m.role == "system")
 
-    assert "draft content plan" not in system_content
+    assert "NONE" in system_content
+    assert "no active draft" in system_content
+    assert "plan_id=" not in system_content

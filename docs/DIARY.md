@@ -1700,3 +1700,43 @@ the guard.
 - Editing already-APPROVED plans (change time on a post already scheduled) — different flow,
   later slice.
 - Undo last edit — straightforward addition once structured ops are proven in prod.
+
+---
+
+## 2026-07-23 — Post-5B live bug fixes
+
+### What was observed (two bugs after first live approve)
+
+**Bug 1 — trailing `_GENERIC_FALLBACK` after approve success:**
+User saw "Scheduled 2 posts" (approve success), THEN the bot also sent "Something went wrong
+on my end." Analysis of all code paths confirmed: `_GENERIC_FALLBACK` only appears in message
+handlers (`handle_message`, `handle_photo`, `_flush_media_group`) — the callback handler
+(`handle_callback`) sends only toasts (`callback.answer()`) and inline-message edits, never
+`_GENERIC_FALLBACK` as a chat message. This means a MESSAGE handler threw a non-PlatformError
+concurrently with or immediately after the callback tap. Exact exception unknown without the
+live log — cannot diagnose further on the VM. Deferred pending log pull from PC.
+
+**Bug 2 — LLM confused about draft state after approval:**
+After `approve_draft_plan` set `plan.status='approved'`, subsequent messages caused the LLM
+to hallucinate draft-editing tool calls. Root cause: `draft_block` was empty string when no
+active draft existed, but `history_block` still contained prior assistant turns referencing
+plan items and tools. LLM had no signal that the draft was gone.
+
+### What was fixed (Bug 2)
+
+`core/engine.py` — `draft_block` is now ALWAYS non-empty. When no active draft exists,
+inject an explicit sentinel:
+```
+Draft plan status: NONE. There is no active draft content plan right now.
+Do NOT call edit_draft_plan, approve_draft_plan, or discard_draft_plan.
+```
+This gives the LLM an authoritative "no draft" signal on every turn that overrides any
+stale plan references in conversation history.
+
+### What failed / still open
+
+- **Bug 1**: Cannot pull `docker compose logs` from the VM. User must run on PC:
+  `docker compose logs bot --no-color --since 2h | grep -A 40 "unexpected_error"`
+  to get the actual exception type + traceback. Do not guess the fix before seeing the log.
+- **Authoritative verification** (PC required): migrations 0005+0006, `pytest -v` (0 skipped),
+  `alembic upgrade head` against real Postgres.
